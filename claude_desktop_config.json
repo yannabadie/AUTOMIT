@@ -1,0 +1,44 @@
+{
+  "mcpServers": {
+    "kestra": {
+      "command": "uvx",
+      "args": ["kestra-mcp"],
+      "env": {
+        "KESTRA_BASE_URL": "http://localhost:8080",
+        "KESTRA_API_TOKEN": "",
+        "KESTRA_USER": "admin",
+        "KESTRA_PASSWORD": "Ch@ngeMeN0w!"
+      }
+    },
+    "x3-oracle": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://MAS_D0Z9TB4:8001/mcp/",
+        "--allow-http",
+        "--header",
+        "X-MCP-TOKEN:Xk7mP2nQ9vL4wR8sT1uY6bC3dF5gH0jK"
+      ]
+    },
+    "cegid-oracle": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://10.255.15.200:8000/mcp",
+        "--allow-http",
+        "--header",
+        "X-MCP-TOKEN:cegid-oracle-dev-token-2026"
+      ]
+    },
+    "filesystem-scripts": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@anthropic-ai/mcp-server-filesystem",
+        "C:/Code/AutomIT"
+      ]
+    }
+  }
+}

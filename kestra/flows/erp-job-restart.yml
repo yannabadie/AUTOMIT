@@ -1,0 +1,409 @@
+# =============================================================================
+# FLOW: ERP Integration Job Restart
+# Triggered by: ZeroClaw agent webhook OR manual
+# Action: Restarts failed CEGID/Sage X3 integration jobs
+# Autonomy Level: L1 (pre-approved, no human validation needed)
+# =============================================================================
+id: erp-job-restart
+namespace: motherson.it.erp
+
+description: |
+  Relance automatique des jobs d'intégration ERP (CEGID XRP Sprint / Sage X3).
+  Déclenché par l'agent ZeroClaw quand il détecte des échecs consécutifs.
+  Niveau d'autonomie L1 : action pré-approuvée, exécution sans validation humaine.
+
+labels:
+  team: it-ops
+  criticality: medium
+  autonomy: L1
+  erp: cegid-sage
+
+inputs:
+  - id: erp_system
+    type: STRING
+    required: true
+    defaults: "cegid"
+    description: "ERP cible: cegid | sage_x3"
+    allowedValues:
+      - cegid
+      - sage_x3
+
+  - id: job_name
+    type: STRING
+    required: true
+    description: "Nom du job à relancer (ex: IMPORT_COMMANDES, SYNC_STOCK)"
+
+  - id: failure_count
+    type: INT
+    required: false
+    defaults: 1
+    description: "Nombre d'échecs consécutifs détectés par l'agent"
+
+  - id: agent_analysis
+    type: STRING
+    required: false
+    description: "Analyse contextuelle fournie par l'agent ZeroClaw"
+
+  - id: correlation_id
+    type: STRING
+    required: false
+    description: "ID de corrélation ZeroClaw pour traçabilité"
+
+variables:
+  max_retries: 3
+  retry_delay_seconds: 30
+  teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+
+tasks:
+  # -------------------------------------------------------------------------
+  # 1. Log l'intervention de l'agent
+  # -------------------------------------------------------------------------
+  - id: log_agent_trigger
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      🤖 Agent ZeroClaw - ERP Job Restart
+      ERP: {{ inputs.erp_system }}
+      Job: {{ inputs.job_name }}
+      Échecs détectés: {{ inputs.failure_count }}
+      Analyse agent: {{ inputs.agent_analysis ?? 'N/A' }}
+      Correlation ID: {{ inputs.correlation_id ?? 'manual' }}
+
+  # -------------------------------------------------------------------------
+  # 2. Vérifier l'état actuel du job ERP
+  # -------------------------------------------------------------------------
+  - id: check_job_status
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: python:3.12-slim
+    env:
+      CEGID_DB_HOST: "{{ secret('CEGID_DB_HOST') }}"
+      CEGID_DB_NAME: "{{ secret('CEGID_DB_NAME') }}"
+      CEGID_DB_USER: "{{ secret('CEGID_DB_USER') }}"
+      CEGID_DB_PASSWORD: "{{ secret('CEGID_DB_PASSWORD') }}"
+      X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
+      X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
+    beforeCommands:
+      - pip install pyodbc requests --quiet
+    script: |
+      import json
+      import os
+      import sys
+
+      erp = "{{ inputs.erp_system }}"
+      job = "{{ inputs.job_name }}"
+
+      status = {
+          "erp": erp, "job": job,
+          "status": "UNKNOWN", "can_restart": False
+      }
+
+      # --- CEGID XRP Sprint (SQL direct) ---
+      if erp == "cegid":
+          import pyodbc
+          try:
+              conn_str = (
+                  f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                  f"SERVER={os.environ['CEGID_DB_HOST']};"
+                  f"DATABASE={os.environ['CEGID_DB_NAME']};"
+                  f"UID={os.environ['CEGID_DB_USER']};"
+                  f"PWD={os.environ['CEGID_DB_PASSWORD']};"
+                  f"TrustServerCertificate=yes;Encrypt=yes;"
+              )
+              conn = pyodbc.connect(conn_str, timeout=30)
+              cursor = conn.cursor()
+
+              # Chercher le job SQL Agent par nom
+              cursor.execute("""
+                  SELECT TOP 1
+                      j.name,
+                      h.run_status,
+                      h.message,
+                      CAST(CAST(h.run_date AS VARCHAR) + ' ' +
+                           STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR), 6),
+                           3, 0, ':'), 6, 0, ':') AS DATETIME) AS last_run
+                  FROM msdb.dbo.sysjobhistory h
+                  JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+                  WHERE j.name LIKE ?
+                  AND h.step_id = 0
+                  ORDER BY h.instance_id DESC
+              """, f"%{job}%")
+              row = cursor.fetchone()
+
+              if row:
+                  run_status_map = {0: "FAILED", 1: "SUCCESS", 2: "RETRY", 3: "CANCELLED"}
+                  status["status"] = run_status_map.get(row[1], "UNKNOWN")
+                  status["error_message"] = row[2][:500] if row[2] else ""
+                  status["last_run"] = row[3].isoformat() + "Z" if row[3] else ""
+                  status["can_restart"] = status["status"] in ("FAILED", "CANCELLED")
+              else:
+                  status["status"] = "NOT_FOUND"
+                  status["error_message"] = f"Aucun job correspondant a '{job}'"
+                  status["can_restart"] = False
+
+              conn.close()
+          except Exception as e:
+              status["status"] = "ERROR"
+              status["error_message"] = str(e)
+              status["can_restart"] = False
+
+      # --- Sage X3 (via MCP x3-oracle) ---
+      elif erp == "sage_x3":
+          import requests
+          try:
+              mcp_url = os.environ["X3_MCP_URL"]
+              headers = {
+                  "X-MCP-TOKEN": os.environ["X3_MCP_TOKEN"],
+                  "Content-Type": "application/json"
+              }
+              rpc_payload = {
+                  "jsonrpc": "2.0", "id": 1,
+                  "method": "tools/call",
+                  "params": {
+                      "name": "batch_status",
+                      "arguments": {"job_name": job}
+                  }
+              }
+              resp = requests.post(mcp_url, json=rpc_payload, headers=headers, timeout=30)
+              if resp.status_code == 200:
+                  data = resp.json()
+                  result = data.get("result", {})
+                  if isinstance(result, dict):
+                      status["status"] = result.get("status", "UNKNOWN")
+                      status["error_message"] = result.get("error", "")
+                      status["last_run"] = result.get("last_run", "")
+                      status["can_restart"] = result.get("can_restart", False)
+                  else:
+                      status["status"] = "MCP_RESPONSE"
+                      status["detail"] = str(result)[:500]
+                      status["can_restart"] = True
+              else:
+                  status["status"] = "MCP_ERROR"
+                  status["error_message"] = f"HTTP {resp.status_code}: {resp.text[:300]}"
+          except Exception as e:
+              status["status"] = "ERROR"
+              status["error_message"] = str(e)
+
+      from kestra import Kestra
+      Kestra.outputs(status)
+
+      if not status["can_restart"]:
+          print(f"Job {job} ne peut pas etre relance: {status.get('error_message', '')}")
+          sys.exit(1)
+
+      print(f"Job {job} peut etre relance - Status: {status['status']}")
+
+  # -------------------------------------------------------------------------
+  # 3. Tenter le restart du job
+  # -------------------------------------------------------------------------
+  - id: restart_job
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: python:3.12-slim
+    env:
+      CEGID_DB_HOST: "{{ secret('CEGID_DB_HOST') }}"
+      CEGID_DB_NAME: "{{ secret('CEGID_DB_NAME') }}"
+      CEGID_DB_USER: "{{ secret('CEGID_DB_USER') }}"
+      CEGID_DB_PASSWORD: "{{ secret('CEGID_DB_PASSWORD') }}"
+      X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
+      X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
+    beforeCommands:
+      - pip install pyodbc requests --quiet
+    script: |
+      import json
+      import os
+      import sys
+
+      erp = "{{ inputs.erp_system }}"
+      job = "{{ inputs.job_name }}"
+      result = {"erp": erp, "job": job, "success": False}
+
+      if erp == "cegid":
+          import pyodbc
+          try:
+              conn_str = (
+                  f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                  f"SERVER={os.environ['CEGID_DB_HOST']};"
+                  f"DATABASE=msdb;"
+                  f"UID={os.environ['CEGID_DB_USER']};"
+                  f"PWD={os.environ['CEGID_DB_PASSWORD']};"
+                  f"TrustServerCertificate=yes;Encrypt=yes;"
+              )
+              conn = pyodbc.connect(conn_str, timeout=30)
+              cursor = conn.cursor()
+
+              # Lancer le job SQL Agent via sp_start_job
+              cursor.execute("EXEC msdb.dbo.sp_start_job @job_name = ?", job)
+              conn.commit()
+              conn.close()
+
+              result["success"] = True
+              result["message"] = f"Job '{job}' demarre via sp_start_job"
+              print(f"[CEGID] Job {job} relance avec succes")
+          except Exception as e:
+              result["error"] = str(e)
+              print(f"[CEGID] Echec relance job {job}: {e}")
+              sys.exit(1)
+
+      elif erp == "sage_x3":
+          import requests
+          try:
+              headers = {
+                  "X-MCP-TOKEN": os.environ["X3_MCP_TOKEN"],
+                  "Content-Type": "application/json"
+              }
+              rpc_payload = {
+                  "jsonrpc": "2.0", "id": 1,
+                  "method": "tools/call",
+                  "params": {
+                      "name": "batch_restart",
+                      "arguments": {"job_name": job}
+                  }
+              }
+              resp = requests.post(
+                  os.environ["X3_MCP_URL"],
+                  json=rpc_payload, headers=headers, timeout=60
+              )
+              if resp.status_code == 200:
+                  data = resp.json()
+                  result["success"] = True
+                  result["mcp_response"] = data.get("result", str(data))
+                  print(f"[Sage X3] Job {job} relance via MCP x3-oracle")
+              else:
+                  result["error"] = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                  print(f"[Sage X3] Echec MCP: {result['error']}")
+                  sys.exit(1)
+          except Exception as e:
+              result["error"] = str(e)
+              print(f"[Sage X3] Echec relance: {e}")
+              sys.exit(1)
+
+      from kestra import Kestra
+      Kestra.outputs(result)
+    retry:
+      maxAttempt: "{{ vars.max_retries }}"
+      type: constant
+      interval: PT{{ vars.retry_delay_seconds }}S
+
+  # -------------------------------------------------------------------------
+  # 4. Vérifier le résultat post-restart
+  # -------------------------------------------------------------------------
+  - id: verify_restart
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: python:3.12-slim
+    env:
+      CEGID_DB_HOST: "{{ secret('CEGID_DB_HOST') }}"
+      CEGID_DB_NAME: "{{ secret('CEGID_DB_NAME') }}"
+      CEGID_DB_USER: "{{ secret('CEGID_DB_USER') }}"
+      CEGID_DB_PASSWORD: "{{ secret('CEGID_DB_PASSWORD') }}"
+      X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
+      X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
+    beforeCommands:
+      - pip install pyodbc requests --quiet
+    script: |
+      import json
+      import os
+      import time
+
+      erp = "{{ inputs.erp_system }}"
+      job = "{{ inputs.job_name }}"
+
+      print("Attente 60s pour verification post-restart...")
+      time.sleep(60)
+
+      result = {"job": job, "post_restart_status": "UNKNOWN", "verified": False}
+
+      if erp == "cegid":
+          import pyodbc
+          try:
+              conn_str = (
+                  f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                  f"SERVER={os.environ['CEGID_DB_HOST']};"
+                  f"DATABASE={os.environ['CEGID_DB_NAME']};"
+                  f"UID={os.environ['CEGID_DB_USER']};"
+                  f"PWD={os.environ['CEGID_DB_PASSWORD']};"
+                  f"TrustServerCertificate=yes;Encrypt=yes;"
+              )
+              conn = pyodbc.connect(conn_str, timeout=30)
+              cursor = conn.cursor()
+              cursor.execute("""
+                  SELECT TOP 1 h.run_status
+                  FROM msdb.dbo.sysjobhistory h
+                  JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+                  WHERE j.name LIKE ? AND h.step_id = 0
+                  ORDER BY h.instance_id DESC
+              """, f"%{job}%")
+              row = cursor.fetchone()
+              conn.close()
+
+              if row:
+                  status_map = {0: "FAILED", 1: "SUCCESS", 2: "RETRY", 3: "CANCELLED"}
+                  result["post_restart_status"] = status_map.get(row[0], "UNKNOWN")
+                  result["verified"] = True
+          except Exception as e:
+              result["error"] = str(e)
+
+      elif erp == "sage_x3":
+          import requests
+          try:
+              headers = {"X-MCP-TOKEN": os.environ["X3_MCP_TOKEN"], "Content-Type": "application/json"}
+              rpc_payload = {
+                  "jsonrpc": "2.0", "id": 1,
+                  "method": "tools/call",
+                  "params": {"name": "batch_status", "arguments": {"job_name": job}}
+              }
+              resp = requests.post(os.environ["X3_MCP_URL"], json=rpc_payload, headers=headers, timeout=30)
+              if resp.status_code == 200:
+                  data = resp.json().get("result", {})
+                  result["post_restart_status"] = data.get("status", "UNKNOWN") if isinstance(data, dict) else "MCP_OK"
+                  result["verified"] = True
+          except Exception as e:
+              result["error"] = str(e)
+
+      from kestra import Kestra
+      Kestra.outputs(result)
+      print(f"Verification post-restart: {result['post_restart_status']}")
+
+  # -------------------------------------------------------------------------
+  # 5. Notification Teams
+  # -------------------------------------------------------------------------
+  - id: notify_teams
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "00CC00",
+        "summary": "ERP Job Restart - {{ inputs.job_name }}",
+        "sections": [{
+          "activityTitle": "🤖 Agent IT - Relance automatique ERP",
+          "facts": [
+            {"name": "ERP", "value": "{{ inputs.erp_system | upper }}"},
+            {"name": "Job", "value": "{{ inputs.job_name }}"},
+            {"name": "Échecs avant relance", "value": "{{ inputs.failure_count }}"},
+            {"name": "Statut", "value": "✅ Relancé avec succès"},
+            {"name": "Analyse agent", "value": "{{ inputs.agent_analysis ?? 'Relance automatique' }}"},
+            {"name": "Execution ID", "value": "{{ execution.id }}"}
+          ]
+        }]
+      }
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  # Webhook pour l'agent ZeroClaw
+  - id: zeroclaw_webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('WEBHOOK_KEY_ERP_RESTART') }}"
+
+  # Fallback: schedule pour vérification périodique
+  - id: scheduled_check
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "*/15 * * * *"  # Toutes les 15 minutes
+    disabled: true  # Activer si nécessaire

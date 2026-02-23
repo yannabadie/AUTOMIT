@@ -1,0 +1,172 @@
+# =============================================================================
+# ZEROCLAW — Agent IT Proactif — Motherson Aerospace
+# Configuration: ~/.zeroclaw/config.toml
+# Role: Surveillance ERP + AD + M365, corrélation d'alertes, triage incidents
+# =============================================================================
+
+# --- LLM Provider -----------------------------------------------------------
+# Option 1: Gemini (cloud, via Gemini CLI subscription)
+# default_provider = "gemini"
+# api_key = ""  # Set via GEMINI_API_KEY env var
+
+# Option 2: Ollama (100% local, air-gap compatible)
+default_provider = "ollama"
+default_model = "qwen2.5-coder:14b"  # Bon compromis perf/taille pour IT ops
+default_temperature = 0.3  # Bas = plus déterministe pour les décisions IT
+
+# Option 3: OpenRouter (multi-provider, fallback)
+# default_provider = "openrouter"
+# default_model = "google/gemini-2.5-flash"
+# api_key = ""  # Set via OPENROUTER_API_KEY env var
+
+# --- Model routing (task-specific) ------------------------------------------
+[model_routing]
+# Raisonnement complexe (corrélation incidents) → modèle plus gros
+analysis = { provider = "ollama", model = "qwen2.5:32b" }
+# Génération de scripts/requêtes → modèle code
+coding = { provider = "ollama", model = "qwen2.5-coder:14b" }
+# Conversation simple (notifications) → modèle léger
+conversation = { provider = "ollama", model = "qwen2.5:7b" }
+
+# --- Memory ------------------------------------------------------------------
+[memory]
+backend = "sqlite"
+auto_save = true
+embedding_provider = "ollama"        # Embeddings locaux
+embedding_model = "nomic-embed-text" # Petit, rapide, efficace
+vector_weight = 0.7
+keyword_weight = 0.3
+
+# --- Gateway -----------------------------------------------------------------
+[gateway]
+host = "127.0.0.1"
+port = 42617
+require_pairing = true
+allow_public_bind = false  # JAMAIS en production
+
+# --- Channels ----------------------------------------------------------------
+[channels]
+enabled = ["webhook", "cli"]
+# Activer Teams/Slack quand prêt:
+# enabled = ["webhook", "cli", "slack"]
+
+# [channels_config.slack]
+# bot_token = ""  # Set via SLACK_BOT_TOKEN env var
+# app_token = ""  # Set via SLACK_APP_TOKEN env var
+# allowed_channels = ["it-ops-alerts", "erp-monitoring"]
+# allowed_users = ["U_YANN", "U_DSI"]  # Restrict qui peut commander l'agent
+
+# --- Autonomy ----------------------------------------------------------------
+[autonomy]
+level = "supervised"  # "readonly" | "supervised" | "autonomous"
+# En mode supervised:
+# - L'agent peut lire, analyser, mémoriser
+# - L'agent peut exécuter des commandes dans l'allowlist
+# - L'agent demande confirmation pour tout le reste
+
+# --- Security ----------------------------------------------------------------
+[security]
+workspace_only = true
+
+[security.command_allowlist]
+# Commandes shell que l'agent peut exécuter SANS validation humaine
+allowed = [
+    # Health checks (lecture seule)
+    "curl http://kestra:8080/api/v1/health",
+    "curl http://kestra:8080/api/v1/executions*",
+    # Déclenchement de flows Kestra pré-approuvés (L1)
+    "curl -X POST http://kestra:8080/api/v1/executions/webhook/*",
+    # Diagnostics réseau basiques
+    "ping -c 3 *",
+    "nslookup *",
+    # Scripts de monitoring read-only
+    "/opt/scripts/check_*.sh",
+    "/opt/scripts/check_*.py",
+]
+
+[security.command_denylist]
+# Commandes INTERDITES — même si dans l'allowlist par pattern
+denied = [
+    "rm -rf *",
+    "shutdown*",
+    "reboot*",
+    "passwd*",
+    "userdel*",
+    "groupdel*",
+    "iptables*",
+    "systemctl stop*",
+    "net user * /delete",
+    "Remove-ADUser*",
+    "Disable-ADAccount*",
+]
+
+[security.filesystem]
+# Répertoires accessibles par l'agent
+allowed_paths = [
+    "/opt/scripts",
+    "/tmp",
+    "/home/zeroclaw/.zeroclaw",
+]
+# Tout le reste est bloqué par défaut (workspace_only = true)
+
+[security.estop]
+# Emergency stop — arrêt d'urgence de l'agent
+enabled = true
+require_otp_to_resume = true  # Besoin d'un OTP pour relancer après e-stop
+
+# --- Tools -------------------------------------------------------------------
+[tools]
+enabled = [
+    "shell",         # Exécution commandes (filtrée par allowlist)
+    "http_request",  # Appels API (Kestra webhooks, Graph API, etc.)
+    "file",          # Lecture/écriture fichiers (dans workspace uniquement)
+    "memory",        # Sauvegarde/rappel contexte
+    "cron",          # Scheduling de tâches récurrentes
+]
+
+# Outils DÉSACTIVÉS volontairement pour la sécurité
+# "browser"    — pas besoin de navigation web
+# "git"        — pas de modif de code en prod
+# "composio"   — pas utilisé pour l'instant
+# "hardware"   — pas d'accès hardware
+
+# --- Cron / Heartbeat --------------------------------------------------------
+[cron]
+enabled = true
+
+# --- Heartbeat (tâches périodiques intégrées à l'agent) ----------------------
+[heartbeat]
+enabled = true
+interval_seconds = 300  # Toutes les 5 minutes
+
+# Message envoyé au LLM à chaque heartbeat — c'est ici que la magie opère
+prompt = """
+Tu es l'agent IT proactif de Motherson Aerospace. Voici ton heartbeat périodique.
+
+CONTEXTE:
+- Tu surveilles les systèmes CEGID XRP Sprint, Sage X3, Active Directory et M365
+- Tu reçois des rapports de santé de Kestra toutes les 5 minutes via webhook
+- Tu as accès à ta mémoire pour corréler avec l'historique
+
+INSTRUCTIONS HEARTBEAT:
+1. Vérifie ta mémoire pour les alertes/anomalies récentes
+2. Identifie les patterns et corrélations (ex: même erreur récurrente)
+3. Si tu détectes un problème nécessitant une action L1:
+   → Exécute: curl -X POST http://kestra:8080/api/v1/executions/webhook/motherson.it.erp/erp-job-restart/$WEBHOOK_KEY -H "Content-Type: application/json" -d '{"erp_system":"...", "job_name":"...", "failure_count":N, "agent_analysis":"..."}'
+4. Si tu détectes un problème nécessitant une escalade L2:
+   → Exécute: curl -X POST http://kestra:8080/api/v1/executions/webhook/motherson.it.incidents/incident-escalation-l2/$WEBHOOK_KEY -H "Content-Type: application/json" -d '{"incident_summary":"...", "affected_system":"...", "severity":"...", "agent_diagnosis":"...", "proposed_actions":"[...]"}'
+5. Si tout est normal, sauvegarde un résumé en mémoire et attends le prochain heartbeat
+
+Ne fais RIEN si tout est sain. N'invente pas de problèmes. Sois factuel.
+"""
+
+# --- Runtime -----------------------------------------------------------------
+[runtime]
+kind = "native"  # "native" | "docker"
+# En production, utiliser "docker" pour isoler l'exécution des commandes
+
+# --- Observer (métriques) ----------------------------------------------------
+[observer]
+enabled = true
+prometheus = true
+prometheus_port = 9100  # Exposition métriques Prometheus

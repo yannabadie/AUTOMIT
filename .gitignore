@@ -1,0 +1,32 @@
+# Secrets
+.env
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+certs/
+
+# Kestra runtime
+/tmp/kestra-wd/
+
+# Docker volumes
+postgres-data/
+kestra-data/
+ollama-models/
+grafana-data/
+
+# ZeroClaw runtime
+*.db
+*.sqlite
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

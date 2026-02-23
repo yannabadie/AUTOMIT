@@ -1,0 +1,225 @@
+# =============================================================================
+# FLOW: Incident Escalation L2
+# Triggered by: ZeroClaw agent when L1 auto-remediation fails
+# Action: Opens ticket, notifies on-call, waits for human approval
+# Autonomy Level: L2 (escalade — validation humaine requise)
+# =============================================================================
+id: incident-escalation-l2
+namespace: motherson.it.incidents
+
+description: |
+  Escalade incident L2 : l'agent ZeroClaw a tenté une remédiation L1 qui a échoué.
+  Ce flow ouvre un ticket, notifie l'astreinte, et attend une validation humaine
+  avant toute action corrective avancée. Principe 4-eyes pour la conformité EN9100.
+
+labels:
+  team: it-ops
+  criticality: high
+  autonomy: L2
+  compliance: EN9100
+
+inputs:
+  - id: incident_summary
+    type: STRING
+    required: true
+    description: "Résumé de l'incident généré par l'agent"
+
+  - id: affected_system
+    type: STRING
+    required: true
+    allowedValues: [cegid, sage_x3, active_directory, m365, network, other]
+
+  - id: severity
+    type: STRING
+    required: true
+    defaults: "medium"
+    allowedValues: [low, medium, high, critical]
+
+  - id: agent_diagnosis
+    type: STRING
+    required: false
+    description: "Diagnostic détaillé de l'agent ZeroClaw"
+
+  - id: proposed_actions
+    type: STRING
+    required: false
+    description: "Actions correctives proposées par l'agent (JSON array)"
+
+  - id: l1_attempts
+    type: STRING
+    required: false
+    description: "Historique des tentatives L1 (JSON)"
+
+  - id: correlation_id
+    type: STRING
+    required: false
+
+variables:
+  teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+  servicenow_url: "{{ secret('SERVICENOW_API_URL') }}"
+
+tasks:
+  # -------------------------------------------------------------------------
+  # 1. Créer le ticket incident (ServiceNow / GLPI / ITSM)
+  # -------------------------------------------------------------------------
+  - id: create_ticket
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: python:3.12-slim
+    beforeCommands:
+      - pip install requests --quiet
+    script: |
+      import json
+      import hashlib
+      from datetime import datetime
+
+      # Générer un ticket ID unique
+      ticket_id = f"INC-{datetime.utcnow().strftime('%Y%m%d')}-" + \
+                  hashlib.md5("{{ execution.id }}".encode()).hexdigest()[:6].upper()
+
+      ticket = {
+          "ticket_id": ticket_id,
+          "title": f"[AUTO-L2] {{ inputs.affected_system | upper }} — {{ inputs.incident_summary[:80] }}",
+          "severity": "{{ inputs.severity }}",
+          "affected_system": "{{ inputs.affected_system }}",
+          "description": "{{ inputs.incident_summary }}",
+          "agent_diagnosis": """{{ inputs.agent_diagnosis ?? 'Pas de diagnostic agent' }}""",
+          "proposed_actions": """{{ inputs.proposed_actions ?? '[]' }}""",
+          "l1_history": """{{ inputs.l1_attempts ?? 'Aucune tentative L1' }}""",
+          "status": "OPEN",
+          "created_by": "zeroclaw-erp-agent",
+          "created_at": datetime.utcnow().isoformat() + "Z",
+          "kestra_execution": "{{ execution.id }}",
+          "correlation_id": "{{ inputs.correlation_id ?? 'N/A' }}"
+      }
+
+      # TODO: POST vers ServiceNow / GLPI API
+      # requests.post(servicenow_url, json=ticket, auth=(...))
+      print(f"🎫 Ticket créé: {ticket_id}")
+      print(json.dumps(ticket, indent=2))
+
+      from kestra import Kestra
+      Kestra.outputs({"ticket_id": ticket_id, "ticket": json.dumps(ticket)})
+
+  # -------------------------------------------------------------------------
+  # 2. Notification Teams avec boutons d'action
+  # -------------------------------------------------------------------------
+  - id: notify_oncall
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "{{ inputs.severity == 'critical' ? 'FF0000' : inputs.severity == 'high' ? 'FFA500' : '0078D4' }}",
+        "summary": "🚨 Escalade L2 — {{ inputs.affected_system | upper }}",
+        "sections": [{
+          "activityTitle": "🤖 Agent IT — Escalade Niveau 2",
+          "activitySubtitle": "Ticket {{ outputs.create_ticket.vars.ticket_id }}",
+          "facts": [
+            {"name": "Système", "value": "{{ inputs.affected_system | upper }}"},
+            {"name": "Sévérité", "value": "{{ inputs.severity | upper }}"},
+            {"name": "Résumé", "value": "{{ inputs.incident_summary }}"},
+            {"name": "Diagnostic Agent", "value": "{{ inputs.agent_diagnosis ?? 'N/A' }}"},
+            {"name": "Actions proposées", "value": "{{ inputs.proposed_actions ?? 'Aucune' }}"}
+          ]
+        }],
+        "potentialAction": [{
+          "@type": "OpenUri",
+          "name": "📋 Voir dans Kestra",
+          "targets": [{
+            "os": "default",
+            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+          }]
+        }]
+      }
+
+  # -------------------------------------------------------------------------
+  # 3. Attente validation humaine (PAUSE — 4-eyes principle)
+  # -------------------------------------------------------------------------
+  - id: wait_human_approval
+    type: io.kestra.plugin.core.flow.Pause
+    timeout: PT4H  # Timeout 4 heures
+    description: |
+      ⏸️ EN ATTENTE DE VALIDATION HUMAINE
+      Ticket: {{ outputs.create_ticket.vars.ticket_id }}
+      Système: {{ inputs.affected_system }}
+      L'opérateur doit valider via l'UI Kestra ou Claude Desktop (MCP).
+      Timeout: 4 heures — si non validé, escalade au N+1.
+
+  # -------------------------------------------------------------------------
+  # 4. Post-validation : exécuter les actions correctives approuvées
+  # -------------------------------------------------------------------------
+  - id: execute_approved_actions
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: python:3.12-slim
+    script: |
+      import json
+      print("✅ Validation humaine reçue — exécution des actions correctives")
+      print(f"Actions: {{ inputs.proposed_actions ?? 'Actions par défaut' }}")
+
+      # TODO: Dispatcher les actions correctives selon le type
+      # Chaque action est un flow Kestra dédié appelé en subflow
+      result = {
+          "status": "EXECUTED",
+          "approved_by": "human_operator",  # TODO: capturer l'identité
+          "actions_taken": "{{ inputs.proposed_actions ?? '[]' }}"
+      }
+
+      from kestra import Kestra
+      Kestra.outputs(result)
+
+  # -------------------------------------------------------------------------
+  # 5. Notification de résolution
+  # -------------------------------------------------------------------------
+  - id: notify_resolution
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "00CC00",
+        "summary": "✅ Incident résolu — {{ outputs.create_ticket.vars.ticket_id }}",
+        "sections": [{
+          "activityTitle": "✅ Incident résolu",
+          "facts": [
+            {"name": "Ticket", "value": "{{ outputs.create_ticket.vars.ticket_id }}"},
+            {"name": "Système", "value": "{{ inputs.affected_system | upper }}"},
+            {"name": "Résolution", "value": "Actions correctives exécutées après validation humaine"}
+          ]
+        }]
+      }
+
+# -------------------------------------------------------------------------
+# Gestion d'erreur et timeout
+# -------------------------------------------------------------------------
+errors:
+  - id: on_timeout_or_error
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "FF0000",
+        "summary": "⚠️ Escalade timeout/erreur — {{ inputs.affected_system }}",
+        "sections": [{
+          "activityTitle": "⚠️ Escalade non traitée dans les délais",
+          "facts": [
+            {"name": "Ticket", "value": "{{ outputs.create_ticket.vars.ticket_id ?? 'N/A' }}"},
+            {"name": "Action requise", "value": "Escalade automatique au N+1"}
+          ]
+        }]
+      }
+
+triggers:
+  - id: zeroclaw_escalation
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('WEBHOOK_KEY_ESCALATION') }}"

@@ -1,0 +1,174 @@
+# =============================================================================
+# FLOW: Active Directory Maintenance & Cleanup
+# Triggered by: Schedule (weekly) + ZeroClaw recommendation
+# Action: Audit comptes inactifs, groupes orphelins, GPO stale
+# Autonomy Level: L1 (rapport) / L2 (actions correctives)
+# =============================================================================
+id: ad-maintenance
+namespace: motherson.it.ad
+
+description: |
+  Maintenance hebdomadaire Active Directory.
+  Phase 1 (L1): Audit et rapport — automatique.
+  Phase 2 (L2): Actions correctives — nécessite validation humaine.
+
+labels:
+  team: it-ops
+  criticality: medium
+  autonomy: L1-L2
+  compliance: EN9100
+
+inputs:
+  - id: mode
+    type: STRING
+    defaults: "audit_only"
+    allowedValues: [audit_only, audit_and_remediate]
+    description: "audit_only = rapport seul | audit_and_remediate = rapport + actions (L2)"
+
+  - id: inactive_days_threshold
+    type: INT
+    defaults: 90
+    description: "Seuil d'inactivité en jours pour flaguer un compte"
+
+tasks:
+  # -------------------------------------------------------------------------
+  # 1. Audit comptes inactifs
+  # -------------------------------------------------------------------------
+  - id: audit_inactive_accounts
+    type: io.kestra.plugin.scripts.shell.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: mcr.microsoft.com/powershell:latest
+    beforeCommands:
+      - pwsh -Command "Install-Module -Name ActiveDirectory -Force -Scope CurrentUser -ErrorAction SilentlyContinue"
+    script: |
+      #!/usr/bin/env pwsh
+
+      $threshold = {{ inputs.inactive_days_threshold }}
+      $cutoff = (Get-Date).AddDays(-$threshold)
+
+      Write-Host "🔍 Audit AD — Comptes inactifs depuis plus de $threshold jours"
+
+      # TODO: En production, connecter au DC réel
+      # $inactiveUsers = Search-ADAccount -AccountInactive -DateTime $cutoff -UsersOnly |
+      #   Select-Object Name, SamAccountName, LastLogonDate, Enabled, DistinguishedName
+
+      # Simulé pour PoC
+      $report = @{
+          scan_date = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+          threshold_days = $threshold
+          inactive_accounts = @(
+              @{ name = "Jean Dupont"; sam = "j.dupont"; last_logon = "2025-10-15"; enabled = $true; ou = "OU=Departed,DC=motherson,DC=local" }
+              @{ name = "SVC_OldApp"; sam = "svc_oldapp"; last_logon = "2025-08-01"; enabled = $true; ou = "OU=Services,DC=motherson,DC=local" }
+          )
+          orphan_groups = @(
+              @{ name = "GRP_Project_2024"; members = 0; last_modified = "2024-06-15" }
+          )
+          stale_gpo = @(
+              @{ name = "Test_GPO_Yann"; linked = $false; last_modified = "2024-12-01" }
+          )
+          summary = @{
+              total_inactive = 2
+              total_orphan_groups = 1
+              total_stale_gpo = 1
+          }
+      }
+
+      $report | ConvertTo-Json -Depth 5 | Out-File -Path /tmp/ad_audit.json
+      Write-Host ($report | ConvertTo-Json -Depth 3)
+
+  # -------------------------------------------------------------------------
+  # 2. Générer le rapport
+  # -------------------------------------------------------------------------
+  - id: generate_report
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: python:3.12-slim
+    script: |
+      import json
+      from datetime import datetime
+
+      # En prod: lire /tmp/ad_audit.json depuis le step précédent
+      report = {
+          "title": "Rapport Maintenance AD — Motherson Aerospace",
+          "date": datetime.utcnow().isoformat() + "Z",
+          "mode": "{{ inputs.mode }}",
+          "findings": {
+              "inactive_accounts": 2,
+              "orphan_groups": 1,
+              "stale_gpo": 1
+          },
+          "recommendations": [
+              "Désactiver j.dupont (parti depuis >90j)",
+              "Investiguer svc_oldapp (compte service peut-être encore utilisé)",
+              "Supprimer GRP_Project_2024 (0 membre, obsolète)",
+              "Supprimer Test_GPO_Yann (non liée, test)"
+          ]
+      }
+
+      from kestra import Kestra
+      Kestra.outputs(report)
+      print(json.dumps(report, indent=2))
+
+  # -------------------------------------------------------------------------
+  # 3. Si mode remediate: pause pour validation humaine
+  # -------------------------------------------------------------------------
+  - id: check_mode
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.mode == 'audit_and_remediate' }}"
+    then:
+      - id: pause_for_approval
+        type: io.kestra.plugin.core.flow.Pause
+        timeout: PT24H
+        description: |
+          ⏸️ VALIDATION REQUISE — Actions correctives AD
+          Comptes à désactiver, groupes à supprimer, GPO à nettoyer.
+          Veuillez valider dans l'UI Kestra.
+
+      - id: execute_remediation
+        type: io.kestra.plugin.scripts.shell.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          containerImage: mcr.microsoft.com/powershell:latest
+        script: |
+          #!/usr/bin/env pwsh
+          Write-Host "🔧 Exécution des actions correctives AD..."
+          # TODO: Implémenter les actions validées
+          # Disable-ADAccount -Identity "j.dupont"
+          # Remove-ADGroup -Identity "GRP_Project_2024" -Confirm:$false
+          # Remove-GPO -Name "Test_GPO_Yann"
+          Write-Host "✅ Actions correctives exécutées (simulé PoC)"
+
+  # -------------------------------------------------------------------------
+  # 4. Notification résultat
+  # -------------------------------------------------------------------------
+  - id: notify_result
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "0078D4",
+        "summary": "📋 Rapport maintenance AD",
+        "sections": [{
+          "activityTitle": "📋 Maintenance AD — Rapport hebdomadaire",
+          "facts": [
+            {"name": "Mode", "value": "{{ inputs.mode }}"},
+            {"name": "Comptes inactifs", "value": "{{ outputs.generate_report.vars.inactive_accounts }}"},
+            {"name": "Groupes orphelins", "value": "{{ outputs.generate_report.vars.orphan_groups }}"},
+            {"name": "GPO obsolètes", "value": "{{ outputs.generate_report.vars.stale_gpo }}"}
+          ]
+        }]
+      }
+
+triggers:
+  - id: weekly_maintenance
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 6 * * 1"  # Chaque lundi à 6h
+
+  - id: agent_triggered
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('WEBHOOK_KEY_AD_MAINTENANCE') }}"
