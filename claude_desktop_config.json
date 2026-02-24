@@ -6,7 +6,7 @@
       "env": {
         "KESTRA_BASE_URL": "http://localhost:8080",
         "KESTRA_API_TOKEN": "",
-        "KESTRA_USER": "admin",
+        "KESTRA_USER": "yann.abadie@motherson-mas.com",
         "KESTRA_PASSWORD": "Ch@ngeMeN0w!"
       }
     },

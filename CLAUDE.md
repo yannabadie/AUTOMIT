@@ -30,6 +30,7 @@ The platform monitors CEGID XRP Sprint, Sage X3, Active Directory, and Microsoft
 
 - **SQL Server (CEGID)**: `TrustServerCertificate=yes` + `Encrypt=yes` (self-signed server cert). Pool recycle 1800s to handle corporate firewall idle timeouts.
 - **Docker builds**: Corporate proxy requires injecting CA bundle (`C:\Code\X3-Oracle\docker\ca-bundle.pem`).
+- **ZeroClaw → OpenAI**: rustls+webpki-roots rejects corporate MITM cert (`UnknownIssuer`). Solved via nginx sidecar proxy (`openai-proxy` service) with `ca-bundle.pem` in system CA store. ZeroClaw calls `http://openai-proxy/backend-api/codex` → nginx proxies to `https://chatgpt.com/backend-api/codex`. Endpoint is `/backend-api/codex/responses` (NOT `/v1/responses`).
 
 ## Stack & Operations
 
@@ -80,6 +81,8 @@ The key constraint: **ZeroClaw never touches infrastructure directly**. It trigg
 |------|---------|
 | `docker-compose.yml` | Full stack definition with optional `local-llm` and `monitoring` profiles |
 | `zeroclaw/config.toml` | ZeroClaw agent config: LLM routing, security allowlist/denylist, heartbeat prompt, tools |
+| `zeroclaw/openai-proxy.conf` | nginx reverse proxy: routes `/backend-api/` → `chatgpt.com`, `/oauth/` → `auth.openai.com` |
+| `zeroclaw/ca-bundle.pem` | Corporate MITM CA bundle for nginx proxy TLS verification |
 | `zeroclaw/IDENTITY.md` | Agent persona, autonomy levels, operational principles |
 | `.env.template` | All required environment variables (webhook keys, credentials, LLM API keys) |
 | `kestra/flows/erp-health-check.yml` | Kestra flow: 5-min cron monitoring CEGID/Sage X3 |
@@ -120,6 +123,36 @@ Flows are YAML files in `kestra/flows/`, auto-loaded via volume mount to `/app/f
 Flow IDs use the namespace as prefix in the YAML `id` field (e.g., `erp-job-restart` under namespace `motherson.it.erp`).
 
 ## Working on ZeroClaw Config
+
+**Version**: v0.1.7 (2026-02-24) — `debian:trixie-slim` (GLIBC 2.41)
+
+**LLM Provider**: `openai-codex` — OAuth via abonnement ChatGPT Pro (zero coût API supplémentaire). Modèle: `gpt-5.3-codex`.
+
+**API Endpoint**: `chatgpt.com/backend-api/codex/responses` (NOT `api.openai.com/v1/responses`). Le Codex CLI et ZeroClaw utilisent l'endpoint backend ChatGPT, pas l'API Platform. Les tokens OIDC (`openid profile email offline_access`) suffisent — pas besoin de scopes API type `api.responses.write`.
+
+**Auth architecture**: ZeroClaw (rustls+webpki-roots) ne peut pas traverser le proxy corporate MITM. Solution: sidecar nginx (`openai-proxy`) qui termine le TLS avec le CA store système (incluant `ca-bundle.pem`).
+
+```
+ZeroClaw (HTTP) → nginx sidecar → HTTPS → chatgpt.com/backend-api/codex/responses
+                                 → HTTPS → auth.openai.com/oauth/* (token refresh)
+```
+
+**Auth initiale** — tokens partagés depuis le Codex CLI host:
+```bash
+# 1. S'authentifier via Codex CLI sur le host Windows (utilise SChannel, passe le proxy)
+codex  # ou: npx @openai/codex  — lance le flow OAuth navigateur
+
+# 2. Chiffrer les tokens Codex CLI dans auth-profiles.json ZeroClaw
+python3 scripts/sync-codex-tokens.py  # ChaCha20-Poly1305, clé .secret_key
+
+# 3. Vérifier
+docker exec automit-zeroclaw-erp-agent-1 zeroclaw auth status
+docker exec automit-zeroclaw-erp-agent-1 zeroclaw agent -m "Dis bonjour"
+```
+
+Token persisté dans `~/.zeroclaw/auth-profiles.json` (chiffré ChaCha20-Poly1305, clé dans `.secret_key`). Fallbacks configurés: Gemini 2.5 Flash (free tier), Ollama (local).
+
+**Embeddings**: `snowflake-arctic-embed2` via Ollama (local, multilingue FR/EN). Nécessite `--profile local-llm`.
 
 `zeroclaw/config.toml` controls the agent behavior. Key sections:
 - `[model_routing]`: Task-specific LLM selection (analysis/coding/conversation)
