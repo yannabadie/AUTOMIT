@@ -14,9 +14,9 @@ The platform monitors CEGID XRP Sprint, Sage X3, Active Directory, and Microsoft
 - **L2**: Agent proposes, human approves via Kestra Pause (e.g., disable compromised AD account)
 - **L3**: Agent recommends, human acts (e.g., "increase timeout for recurring failures")
 
-**Status**: PoC avance — ERP connections, onboarding/offboarding, et Graph API operationnels. AD PowerShell et Azure credentials restent a configurer en prod.
+**Status**: PoC complet — les 4 priorites sont implementees. AD PowerShell et Azure credentials restent a configurer en prod.
 
-**Priorities**: (1) ~~Real ERP connections~~ DONE, (2) ~~Onboarding/offboarding flow~~ DONE, (3) ~~Microsoft Graph API integration~~ DONE, (4) Grafana dashboard.
+**Priorities**: (1) ~~Real ERP connections~~ DONE, (2) ~~Onboarding/offboarding flow~~ DONE, (3) ~~Microsoft Graph API integration~~ DONE, (4) ~~Grafana dashboard~~ DONE.
 
 ## Target Infrastructure
 
@@ -92,6 +92,9 @@ The key constraint: **ZeroClaw never touches infrastructure directly**. It trigg
 | `kestra/flows/ad-onboarding.yml` | Kestra flow: L2 onboarding — AD + M365 + ERP provisioning |
 | `kestra/flows/ad-offboarding.yml` | Kestra flow: L2 offboarding — disable AD, revoke M365, revoke ERP |
 | `kestra/flows/m365-audit.yml` | Kestra flow: weekly M365 audit — licences, MFA, risky users, sign-ins |
+| `docs/prometheus.yml` | Prometheus scraping config (Kestra + Pushgateway) |
+| `docs/grafana/dashboards/automit-overview.json` | Grafana dashboard: ERP health, M365, Kestra executions |
+| `docs/grafana/provisioning/` | Grafana auto-provisioning: datasource + dashboard provider |
 | `scripts/erp/test_connectivity.py` | Connectivity test: CEGID MCP + Sage X3 MCP (8 tests) |
 | `scripts/docker/Dockerfile.python-erp` | Custom Docker image: python:3.12-slim + ODBC 17 + corporate CA |
 | `scripts/sync-codex-tokens.py` | Token sync from Codex CLI to ZeroClaw (ChaCha20-Poly1305) |

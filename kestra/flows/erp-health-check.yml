@@ -543,11 +543,77 @@ tasks:
 
       print(json.dumps(report, indent=2))
 
-      # Envoyer au ZeroClaw gateway pour analyse proactive
+      # --- Pousser les metriques vers Prometheus Pushgateway ---
+      pushgw_url = os.getenv("PUSHGATEWAY_URL", "http://pushgateway:9091")
+      status_map = {"HEALTHY": 2, "DEGRADED": 1, "CRITICAL": 0}
+      try:
+          metrics_lines = []
+
+          # Statut global par systeme
+          for sys_name in ("cegid", "sage_x3", "m365"):
+              sys_data = report["systems"].get(sys_name, {})
+              val = status_map.get(sys_data.get("overall_status", "HEALTHY"), 2)
+              metrics_lines.append(f'automit_erp_health{{system="{sys_name}"}} {val}')
+
+          # M365 health
+          m365 = report["systems"].get("m365", {})
+          m365_val = status_map.get(m365.get("overall_status", "HEALTHY"), 2)
+          metrics_lines.append(f"automit_m365_health {m365_val}")
+
+          # CEGID details
+          cegid = report["systems"].get("cegid", {})
+          cegid_checks = cegid.get("checks", {})
+          # Sessions actives
+          sessions = cegid_checks.get("active_sessions", {})
+          if isinstance(sessions, dict) and isinstance(sessions.get("count"), (int, float)):
+              metrics_lines.append(f"automit_cegid_active_sessions {sessions['count']}")
+          # Jobs en echec
+          jobs = cegid_checks.get("batch_jobs", {})
+          if isinstance(jobs, dict):
+              if isinstance(jobs.get("failed_last_hour"), (int, float)):
+                  metrics_lines.append(f"automit_cegid_failed_jobs_last_hour {jobs['failed_last_hour']}")
+          # MCP response time
+          mcp_conn = cegid_checks.get("mcp_connection", {})
+          if isinstance(mcp_conn, dict) and isinstance(mcp_conn.get("response_time_ms"), (int, float)):
+              metrics_lines.append(f'automit_mcp_response_time_ms{{server="cegid"}} {mcp_conn["response_time_ms"]}')
+
+          # Sage X3 MCP response time
+          x3 = report["systems"].get("sage_x3", {})
+          x3_mcp = x3.get("checks", {}).get("mcp_connection", {})
+          if isinstance(x3_mcp, dict) and isinstance(x3_mcp.get("response_time_ms"), (int, float)):
+              metrics_lines.append(f'automit_mcp_response_time_ms{{server="sage_x3"}} {x3_mcp["response_time_ms"]}')
+
+          # M365 licences
+          m365_checks = m365.get("checks", {})
+          lic = m365_checks.get("license_usage", {})
+          if isinstance(lic, dict):
+              if isinstance(lic.get("total"), (int, float)):
+                  metrics_lines.append(f"automit_m365_licenses_total {lic['total']}")
+              if isinstance(lic.get("assigned"), (int, float)):
+                  metrics_lines.append(f"automit_m365_licenses_assigned {lic['assigned']}")
+              if isinstance(lic.get("usage_percent"), (int, float)):
+                  metrics_lines.append(f"automit_m365_license_usage_percent {lic['usage_percent']}")
+          # Security alerts
+          sec = m365_checks.get("security_alerts", {})
+          if isinstance(sec, dict) and isinstance(sec.get("high_critical"), (int, float)):
+              metrics_lines.append(f"automit_m365_security_alerts_high {sec['high_critical']}")
+
+          # Push to Pushgateway
+          payload = "\n".join(metrics_lines) + "\n"
+          resp = requests.post(
+              f"{pushgw_url}/metrics/job/automit_health_check",
+              data=payload,
+              headers={"Content-Type": "text/plain"},
+              timeout=5
+          )
+          print(f"📊 Metriques poussees vers Pushgateway: {resp.status_code} ({len(metrics_lines)} metriques)")
+      except Exception as e:
+          print(f"⚠️ Pushgateway non joignable: {e} — pas bloquant")
+
+      # --- Envoyer au ZeroClaw gateway pour analyse proactive ---
       zeroclaw_url = os.getenv("ZEROCLAW_GATEWAY_URL",
                                 "http://zeroclaw-erp-agent:42617")
       try:
-          # Envoyer via webhook interne
           resp = requests.post(
               f"{zeroclaw_url}/webhook",
               json={"message": json.dumps(report)},

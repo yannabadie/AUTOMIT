@@ -179,7 +179,20 @@ services:
       - monitoring
 
   # ---------------------------------------------------------------------------
-  # GRAFANA — Dashboards
+  # PUSHGATEWAY — Custom metrics from Kestra flows (ERP health, M365 status)
+  # ---------------------------------------------------------------------------
+  pushgateway:
+    image: prom/pushgateway:latest
+    ports:
+      - "9091:9091"
+    networks:
+      - motherson-net
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # ---------------------------------------------------------------------------
+  # GRAFANA — Dashboards (auto-provisioned)
   # ---------------------------------------------------------------------------
   grafana:
     image: grafana/grafana:latest
@@ -187,8 +200,14 @@ services:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/automit-overview.json
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./docs/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./docs/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docs/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
     networks:
       - motherson-net
     restart: unless-stopped
