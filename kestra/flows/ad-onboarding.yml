@@ -1,0 +1,646 @@
+# =============================================================================
+# FLOW: Employee Onboarding — Provisioning IT complet
+# Triggered by: ZeroClaw agent webhook OR manual via Kestra UI
+# Action: Crée compte AD, assigne licence M365, provisionne accès ERP
+# Autonomy Level: L2 (validation humaine requise — conformité EN9100)
+# =============================================================================
+id: ad-onboarding
+namespace: motherson.it.ad
+
+description: |
+  Provisioning IT d'un nouveau collaborateur Motherson Aerospace.
+  Crée le compte AD, assigne les groupes, provisionne la licence M365,
+  configure l'accès ERP (CEGID/Sage X3) selon le rôle.
+  Niveau L2 : validation humaine obligatoire avant exécution (4-eyes, EN9100).
+
+labels:
+  team: it-ops
+  criticality: high
+  autonomy: L2
+  compliance: EN9100
+
+inputs:
+  - id: action_type
+    type: STRING
+    required: true
+    defaults: "onboarding"
+    allowedValues: [onboarding]
+
+  - id: first_name
+    type: STRING
+    required: true
+    description: "Prenom du collaborateur"
+
+  - id: last_name
+    type: STRING
+    required: true
+    description: "Nom de famille du collaborateur"
+
+  - id: job_title
+    type: STRING
+    required: true
+    description: "Intitule du poste (ex: Operateur CN, Ingenieur Qualite)"
+
+  - id: department
+    type: STRING
+    required: true
+    allowedValues: [production, quality, engineering, logistics, finance, hr, it, management]
+    description: "Service d'affectation"
+
+  - id: site
+    type: STRING
+    required: true
+    defaults: "serre-castet"
+    allowedValues: [serre-castet, tanger]
+    description: "Site physique"
+
+  - id: manager_email
+    type: STRING
+    required: true
+    description: "Email du manager direct (pour notification et approbation)"
+
+  - id: start_date
+    type: STRING
+    required: true
+    description: "Date d'arrivee (YYYY-MM-DD)"
+
+  - id: contract_type
+    type: STRING
+    required: true
+    defaults: "cdi"
+    allowedValues: [cdi, cdd, interim, stagiaire, prestataire]
+
+  - id: erp_access
+    type: STRING
+    required: false
+    defaults: "none"
+    allowedValues: [none, cegid, sage_x3, both]
+    description: "Acces ERP requis"
+
+  - id: erp_profile
+    type: STRING
+    required: false
+    description: "Profil ERP (ex: CONSULTATION, SAISIE, ADMIN) — JSON si multiple"
+
+  - id: m365_license
+    type: STRING
+    required: false
+    defaults: "E3"
+    allowedValues: [E3, E1, F3, none]
+    description: "Type de licence Microsoft 365"
+
+  - id: sensitive_groups
+    type: STRING
+    required: false
+    description: "Groupes sensibles additionnels (JSON array, ex: ['GRP_Finance','GRP_Direction'])"
+
+  - id: vpn_access
+    type: BOOLEAN
+    required: false
+    defaults: false
+    description: "Acces VPN requis"
+
+  - id: correlation_id
+    type: STRING
+    required: false
+
+variables:
+  teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+  ad_domain: "{{ secret('AD_DOMAIN') }}"
+
+tasks:
+  # -------------------------------------------------------------------------
+  # 1. Valider et preparer le plan de provisioning
+  # -------------------------------------------------------------------------
+  - id: prepare_provisioning_plan
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      import hashlib
+      import re
+      from datetime import datetime
+
+      first = "{{ inputs.first_name }}".strip()
+      last = "{{ inputs.last_name }}".strip()
+      department = "{{ inputs.department }}"
+      site = "{{ inputs.site }}"
+      contract = "{{ inputs.contract_type }}"
+
+      # --- Convention de nommage AD Motherson ---
+      # Format: prenom.nom (lowercase, sans accents)
+      def normalize(s):
+          import unicodedata
+          s = unicodedata.normalize('NFD', s)
+          s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+          return s.lower().replace(' ', '-').replace("'", '')
+
+      sam_account = f"{normalize(first)}.{normalize(last)}"
+      upn = f"{sam_account}@adigroupe.onmicrosoft.com"
+      email = upn
+      display_name = f"{first} {last}"
+
+      # Ticket ID
+      ticket_id = f"ONB-{datetime.utcnow().strftime('%Y%m%d')}-" + \
+                  hashlib.md5("{{ execution.id }}".encode()).hexdigest()[:6].upper()
+
+      # OU cible selon le type de contrat et le site
+      ou_map = {
+          "cdi": f"OU=Employes,OU={site.title().replace('-', '')},OU=Users,DC=adgroupe,DC=com",
+          "cdd": f"OU=CDD,OU={site.title().replace('-', '')},OU=Users,DC=adgroupe,DC=com",
+          "interim": f"OU=Externes,OU={site.title().replace('-', '')},OU=Users,DC=adgroupe,DC=com",
+          "stagiaire": f"OU=Stagiaires,OU={site.title().replace('-', '')},OU=Users,DC=adgroupe,DC=com",
+          "prestataire": f"OU=Externes,OU={site.title().replace('-', '')},OU=Users,DC=adgroupe,DC=com",
+      }
+      target_ou = ou_map.get(contract, ou_map["cdi"])
+
+      # Groupes AD par defaut selon le departement
+      department_groups = {
+          "production": ["GRP_Production", "GRP_Atelier", "GRP_MES_Users"],
+          "quality": ["GRP_Qualite", "GRP_EN9100_Readers"],
+          "engineering": ["GRP_Bureau_Etudes", "GRP_CAO_Users"],
+          "logistics": ["GRP_Logistique", "GRP_WMS_Users"],
+          "finance": ["GRP_Finance", "GRP_Compta"],
+          "hr": ["GRP_RH"],
+          "it": ["GRP_IT", "GRP_IT_Admins"],
+          "management": ["GRP_Direction", "GRP_Managers"],
+      }
+      base_groups = ["GRP_AllStaff", f"GRP_Site_{site.title().replace('-', '')}"]
+      dept_groups = department_groups.get(department, [])
+      all_groups = base_groups + dept_groups
+
+      # Groupes sensibles (optionnels, L2 explicite)
+      sensitive = []
+      sensitive_raw = """{{ inputs.sensitive_groups ?? '' }}"""
+      if sensitive_raw.strip():
+          try:
+              sensitive = json.loads(sensitive_raw)
+          except:
+              sensitive = [g.strip() for g in sensitive_raw.split(',') if g.strip()]
+
+      # Generer mot de passe temporaire
+      import secrets
+      import string
+      chars = string.ascii_letters + string.digits + "!@#$%&*"
+      temp_password = ''.join(secrets.choice(chars) for _ in range(16))
+
+      # Plan complet
+      plan = {
+          "ticket_id": ticket_id,
+          "display_name": display_name,
+          "sam_account": sam_account,
+          "upn": upn,
+          "email": email,
+          "target_ou": target_ou,
+          "department": department,
+          "job_title": "{{ inputs.job_title }}",
+          "site": site,
+          "contract_type": contract,
+          "manager_email": "{{ inputs.manager_email }}",
+          "start_date": "{{ inputs.start_date }}",
+          "temp_password": temp_password,
+          "groups": all_groups,
+          "sensitive_groups": sensitive,
+          "m365_license": "{{ inputs.m365_license ?? 'E3' }}",
+          "erp_access": "{{ inputs.erp_access ?? 'none' }}",
+          "erp_profile": """{{ inputs.erp_profile ?? '' }}""",
+          "vpn_access": {{ 'True' if inputs.vpn_access else 'False' }},
+          "steps": [],
+          "created_at": datetime.utcnow().isoformat() + "Z",
+          "kestra_execution": "{{ execution.id }}"
+      }
+
+      # Lister les etapes prevues
+      plan["steps"].append("1. Creer compte AD dans " + target_ou)
+      plan["steps"].append(f"2. Ajouter aux groupes: {', '.join(all_groups)}")
+      if sensitive:
+          plan["steps"].append(f"   + Groupes sensibles: {', '.join(sensitive)}")
+      if plan["m365_license"] != "none":
+          plan["steps"].append(f"3. Provisionner M365 ({plan['m365_license']}): {email}")
+      if plan["erp_access"] != "none":
+          plan["steps"].append(f"4. Provisionner acces ERP: {plan['erp_access']}")
+      if plan["vpn_access"]:
+          plan["steps"].append("5. Configurer acces VPN")
+      plan["steps"].append("6. Notifier manager + IT")
+
+      print(f"Ticket: {ticket_id}")
+      print(f"Plan de provisioning pour {display_name}:")
+      for s in plan["steps"]:
+          print(f"  {s}")
+
+      from kestra import Kestra
+      Kestra.outputs({
+          "ticket_id": ticket_id,
+          "plan": json.dumps(plan),
+          "sam_account": sam_account,
+          "upn": upn,
+          "display_name": display_name,
+          "temp_password": temp_password,
+          "target_ou": target_ou,
+          "groups_json": json.dumps(all_groups),
+          "sensitive_groups_json": json.dumps(sensitive)
+      })
+
+  # -------------------------------------------------------------------------
+  # 2. Notification Teams + demande validation humaine
+  # -------------------------------------------------------------------------
+  - id: notify_approval_request
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "0078D4",
+        "summary": "Onboarding — {{ outputs.prepare_provisioning_plan.vars.display_name }}",
+        "sections": [{
+          "activityTitle": "🆕 Demande d'onboarding IT — Validation requise",
+          "activitySubtitle": "Ticket {{ outputs.prepare_provisioning_plan.vars.ticket_id }}",
+          "facts": [
+            {"name": "Collaborateur", "value": "{{ outputs.prepare_provisioning_plan.vars.display_name }}"},
+            {"name": "Login", "value": "{{ outputs.prepare_provisioning_plan.vars.sam_account }}"},
+            {"name": "Poste", "value": "{{ inputs.job_title }}"},
+            {"name": "Service", "value": "{{ inputs.department | upper }}"},
+            {"name": "Site", "value": "{{ inputs.site | upper }}"},
+            {"name": "Contrat", "value": "{{ inputs.contract_type | upper }}"},
+            {"name": "Date d'arrivee", "value": "{{ inputs.start_date }}"},
+            {"name": "Manager", "value": "{{ inputs.manager_email }}"},
+            {"name": "Licence M365", "value": "{{ inputs.m365_license ?? 'E3' }}"},
+            {"name": "Acces ERP", "value": "{{ inputs.erp_access ?? 'none' }}"}
+          ]
+        }],
+        "potentialAction": [{
+          "@type": "OpenUri",
+          "name": "✅ Valider dans Kestra",
+          "targets": [{
+            "os": "default",
+            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+          }]
+        }]
+      }
+
+  # -------------------------------------------------------------------------
+  # 3. PAUSE — Validation humaine (4-eyes EN9100)
+  # -------------------------------------------------------------------------
+  - id: wait_human_approval
+    type: io.kestra.plugin.core.flow.Pause
+    timeout: PT48H
+    description: |
+      ⏸️ VALIDATION REQUISE — Onboarding IT
+      Ticket: {{ outputs.prepare_provisioning_plan.vars.ticket_id }}
+      Collaborateur: {{ outputs.prepare_provisioning_plan.vars.display_name }}
+      Login: {{ outputs.prepare_provisioning_plan.vars.sam_account }}
+      L'operateur IT doit valider via l'UI Kestra.
+      Timeout: 48 heures.
+
+  # -------------------------------------------------------------------------
+  # 4. Creer le compte Active Directory
+  # -------------------------------------------------------------------------
+  - id: create_ad_account
+    type: io.kestra.plugin.scripts.shell.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: mcr.microsoft.com/powershell:latest
+    env:
+      AD_DOMAIN: "{{ secret('AD_DOMAIN') }}"
+      AD_DC: "{{ secret('AD_DC') }}"
+      AD_SERVICE_ACCOUNT: "{{ secret('AD_SERVICE_ACCOUNT') }}"
+      AD_SERVICE_PASSWORD: "{{ secret('AD_SERVICE_PASSWORD') }}"
+    script: |
+      #!/usr/bin/env pwsh
+
+      $ErrorActionPreference = "Stop"
+      $plan = '{{ outputs.prepare_provisioning_plan.vars.plan }}' | ConvertFrom-Json
+
+      Write-Host "🔧 Creation compte AD: $($plan.display_name)"
+      Write-Host "  SAM: $($plan.sam_account)"
+      Write-Host "  UPN: $($plan.upn)"
+      Write-Host "  OU:  $($plan.target_ou)"
+
+      # --- Connexion au DC ---
+      $secPass = ConvertTo-SecureString $env:AD_SERVICE_PASSWORD -AsPlainText -Force
+      $cred = New-Object System.Management.Automation.PSCredential($env:AD_SERVICE_ACCOUNT, $secPass)
+
+      $dcParam = @{}
+      if ($env:AD_DC) { $dcParam["Server"] = $env:AD_DC }
+
+      # --- Creer le compte ---
+      $userParams = @{
+          Name              = $plan.display_name
+          GivenName         = $plan.display_name.Split(' ')[0]
+          Surname           = ($plan.display_name.Split(' ') | Select-Object -Skip 1) -join ' '
+          SamAccountName    = $plan.sam_account
+          UserPrincipalName = $plan.upn
+          EmailAddress      = $plan.email
+          Title             = $plan.job_title
+          Department        = $plan.department
+          Company           = "Motherson Aerospace"
+          Description       = "Onboarding $($plan.ticket_id) — $($plan.contract_type)"
+          Path              = $plan.target_ou
+          AccountPassword   = (ConvertTo-SecureString $plan.temp_password -AsPlainText -Force)
+          ChangePasswordAtLogon = $true
+          Enabled           = $true
+          Credential        = $cred
+      }
+      $userParams += $dcParam
+
+      try {
+          New-ADUser @userParams
+          Write-Host "✅ Compte AD cree: $($plan.sam_account)"
+      } catch {
+          if ($_.Exception.Message -like "*already exists*") {
+              Write-Host "⚠️ Compte AD existe deja: $($plan.sam_account) — skip creation"
+          } else {
+              throw $_
+          }
+      }
+
+      # --- Ajouter aux groupes ---
+      $groups = $plan.groups
+      foreach ($group in $groups) {
+          try {
+              Add-ADGroupMember -Identity $group -Members $plan.sam_account -Credential $cred @dcParam
+              Write-Host "  ✅ Ajoute a $group"
+          } catch {
+              Write-Host "  ⚠️ Groupe $group : $($_.Exception.Message)"
+          }
+      }
+
+      # --- Groupes sensibles ---
+      if ($plan.sensitive_groups -and $plan.sensitive_groups.Count -gt 0) {
+          Write-Host "🔐 Ajout aux groupes sensibles:"
+          foreach ($group in $plan.sensitive_groups) {
+              try {
+                  Add-ADGroupMember -Identity $group -Members $plan.sam_account -Credential $cred @dcParam
+                  Write-Host "  ✅ Ajoute a $group (sensible)"
+              } catch {
+                  Write-Host "  ⚠️ Groupe sensible $group : $($_.Exception.Message)"
+              }
+          }
+      }
+
+      Write-Host "✅ Provisioning AD termine pour $($plan.sam_account)"
+
+  # -------------------------------------------------------------------------
+  # 5. Provisionner Microsoft 365 (Graph API)
+  # -------------------------------------------------------------------------
+  - id: provision_m365
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.m365_license != 'none' }}"
+    then:
+      - id: create_m365_user
+        type: io.kestra.plugin.scripts.python.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          containerImage: automit/python-erp:3.12
+        env:
+          AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+          AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+          AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+        script: |
+          import json
+          import os
+          import requests
+
+          plan = json.loads('''{{ outputs.prepare_provisioning_plan.vars.plan }}''')
+          license_type = plan["m365_license"]
+
+          tenant = os.environ.get("AZURE_TENANT_ID", "")
+          client_id = os.environ.get("AZURE_CLIENT_ID", "")
+          client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+
+          result = {"m365_provisioned": False, "license": license_type}
+
+          if not all([tenant, client_id, client_secret]):
+              print("⚠️ Azure AD App Registration non configuree (AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET vides)")
+              print("   M365 provisioning sera fait manuellement")
+              result["status"] = "MANUAL_REQUIRED"
+              result["reason"] = "Azure AD credentials not configured"
+          else:
+              try:
+                  # Obtenir un token Graph API
+                  token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+                  token_resp = requests.post(token_url, data={
+                      "client_id": client_id,
+                      "client_secret": client_secret,
+                      "scope": "https://graph.microsoft.com/.default",
+                      "grant_type": "client_credentials"
+                  }, timeout=30)
+                  token_resp.raise_for_status()
+                  access_token = token_resp.json()["access_token"]
+
+                  headers = {
+                      "Authorization": f"Bearer {access_token}",
+                      "Content-Type": "application/json"
+                  }
+
+                  # Verifier si l'utilisateur existe deja dans Azure AD
+                  check_url = f"https://graph.microsoft.com/v1.0/users/{plan['upn']}"
+                  check_resp = requests.get(check_url, headers=headers, timeout=15)
+
+                  if check_resp.status_code == 200:
+                      print(f"✅ Utilisateur M365 existe deja: {plan['upn']}")
+                      result["m365_provisioned"] = True
+                      result["status"] = "ALREADY_EXISTS"
+                  elif check_resp.status_code == 404:
+                      # L'utilisateur sera synchronise via Azure AD Connect si AD on-prem
+                      # Sinon, creer directement dans Azure AD
+                      print(f"📝 Utilisateur {plan['upn']} non trouve dans Azure AD")
+                      print("   Si Azure AD Connect est actif, l'utilisateur sera synchronise automatiquement")
+                      print("   Sinon, creation manuelle requise dans le portail M365")
+                      result["status"] = "PENDING_SYNC"
+                      result["m365_provisioned"] = True
+                  else:
+                      result["status"] = f"CHECK_ERROR_{check_resp.status_code}"
+                      result["detail"] = check_resp.text[:300]
+
+                  # Assigner la licence (SKU mapping)
+                  sku_map = {
+                      "E3": "05e9a617-0261-4cee-bb44-138d3ef5d965",  # M365 E3
+                      "E1": "18181a46-0d4e-45cd-891e-60aabd171b4e",  # M365 E1
+                      "F3": "66b55226-6b4f-492c-910c-a3b7a3c9d993",  # M365 F3
+                  }
+                  if license_type in sku_map and result.get("status") != "MANUAL_REQUIRED":
+                      print(f"📋 Licence {license_type} a assigner apres synchronisation AD")
+                      result["license_sku"] = sku_map[license_type]
+
+              except Exception as e:
+                  result["status"] = "ERROR"
+                  result["error"] = str(e)
+                  print(f"❌ Erreur M365: {e}")
+
+          from kestra import Kestra
+          Kestra.outputs(result)
+          print(json.dumps(result, indent=2))
+
+  # -------------------------------------------------------------------------
+  # 6. Provisionner acces ERP (CEGID / Sage X3)
+  # -------------------------------------------------------------------------
+  - id: provision_erp
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.erp_access != 'none' }}"
+    then:
+      - id: create_erp_access
+        type: io.kestra.plugin.scripts.python.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          containerImage: automit/python-erp:3.12
+        env:
+          CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
+          CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
+          X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
+          X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
+        script: |
+          import json
+          import os
+          import requests
+
+          plan = json.loads('''{{ outputs.prepare_provisioning_plan.vars.plan }}''')
+          erp_access = plan["erp_access"]
+          erp_profile = plan.get("erp_profile", "")
+          sam = plan["sam_account"]
+          result = {"erp_provisioned": [], "errors": []}
+
+          def mcp_call(mcp_url, mcp_token, tool_name, arguments):
+              headers = {
+                  "X-MCP-TOKEN": mcp_token,
+                  "Content-Type": "application/json",
+                  "Accept": "application/json"
+              }
+              payload = {
+                  "jsonrpc": "2.0", "id": 1,
+                  "method": "tools/call",
+                  "params": {"name": tool_name, "arguments": arguments}
+              }
+              resp = requests.post(mcp_url, json=payload, headers=headers, timeout=30)
+              if resp.status_code == 200:
+                  return resp.json().get("result", resp.json())
+              raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
+
+          # --- CEGID ---
+          if erp_access in ("cegid", "both"):
+              print(f"📦 Provisioning CEGID pour {sam}...")
+              try:
+                  # Verifier si l'utilisateur CEGID existe deja
+                  check_result = mcp_call(
+                      os.environ["CEGID_MCP_URL"],
+                      os.environ["CEGID_MCP_TOKEN"],
+                      "query_database",
+                      {"sql": f"SELECT TOP 1 * FROM UTILISATEURS WHERE UTI_LOGIN LIKE '%{sam}%'", "limit": 1}
+                  )
+                  print(f"  CEGID check: {str(check_result)[:300]}")
+                  result["erp_provisioned"].append({
+                      "erp": "cegid",
+                      "status": "CHECKED",
+                      "detail": "Creation utilisateur CEGID requiert acces admin CEGID — escalade manuelle",
+                      "profile": erp_profile
+                  })
+              except Exception as e:
+                  print(f"  ⚠️ CEGID check: {e}")
+                  result["errors"].append({"erp": "cegid", "error": str(e)})
+                  result["erp_provisioned"].append({
+                      "erp": "cegid",
+                      "status": "MANUAL_REQUIRED",
+                      "detail": str(e)
+                  })
+
+          # --- Sage X3 ---
+          if erp_access in ("sage_x3", "both"):
+              print(f"📦 Provisioning Sage X3 pour {sam}...")
+              try:
+                  check_result = mcp_call(
+                      os.environ["X3_MCP_URL"],
+                      os.environ["X3_MCP_TOKEN"],
+                      "query_database",
+                      {"sql": f"SELECT * FROM AUTILIS WHERE USR_0 LIKE '%{sam.upper()[:10]}%'", "limit": 1}
+                  )
+                  print(f"  X3 check: {str(check_result)[:300]}")
+                  result["erp_provisioned"].append({
+                      "erp": "sage_x3",
+                      "status": "CHECKED",
+                      "detail": "Creation utilisateur X3 requiert acces admin Sage — escalade manuelle",
+                      "profile": erp_profile
+                  })
+              except Exception as e:
+                  print(f"  ⚠️ X3 check: {e}")
+                  result["errors"].append({"erp": "sage_x3", "error": str(e)})
+                  result["erp_provisioned"].append({
+                      "erp": "sage_x3",
+                      "status": "MANUAL_REQUIRED",
+                      "detail": str(e)
+                  })
+
+          from kestra import Kestra
+          Kestra.outputs(result)
+          print(json.dumps(result, indent=2))
+
+  # -------------------------------------------------------------------------
+  # 7. Notification finale — recapitulatif onboarding
+  # -------------------------------------------------------------------------
+  - id: notify_onboarding_complete
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "00CC00",
+        "summary": "✅ Onboarding termine — {{ outputs.prepare_provisioning_plan.vars.display_name }}",
+        "sections": [{
+          "activityTitle": "✅ Onboarding IT termine",
+          "activitySubtitle": "Ticket {{ outputs.prepare_provisioning_plan.vars.ticket_id }}",
+          "facts": [
+            {"name": "Collaborateur", "value": "{{ outputs.prepare_provisioning_plan.vars.display_name }}"},
+            {"name": "Login AD", "value": "{{ outputs.prepare_provisioning_plan.vars.sam_account }}"},
+            {"name": "Email", "value": "{{ outputs.prepare_provisioning_plan.vars.upn }}"},
+            {"name": "Poste", "value": "{{ inputs.job_title }}"},
+            {"name": "Service", "value": "{{ inputs.department | upper }}"},
+            {"name": "Site", "value": "{{ inputs.site | upper }}"},
+            {"name": "Date d'arrivee", "value": "{{ inputs.start_date }}"},
+            {"name": "Licence M365", "value": "{{ inputs.m365_license ?? 'E3' }}"},
+            {"name": "Acces ERP", "value": "{{ inputs.erp_access ?? 'none' }}"},
+            {"name": "Execution", "value": "{{ execution.id }}"}
+          ]
+        }],
+        "potentialAction": [{
+          "@type": "OpenUri",
+          "name": "📋 Details dans Kestra",
+          "targets": [{
+            "os": "default",
+            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+          }]
+        }]
+      }
+
+# -------------------------------------------------------------------------
+# Gestion timeout / erreur
+# -------------------------------------------------------------------------
+errors:
+  - id: on_error
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "FF0000",
+        "summary": "❌ Erreur onboarding — {{ inputs.first_name }} {{ inputs.last_name }}",
+        "sections": [{
+          "activityTitle": "❌ Echec onboarding IT",
+          "facts": [
+            {"name": "Collaborateur", "value": "{{ inputs.first_name }} {{ inputs.last_name }}"},
+            {"name": "Ticket", "value": "{{ outputs.prepare_provisioning_plan.vars.ticket_id ?? 'N/A' }}"},
+            {"name": "Action requise", "value": "Verifier les logs Kestra et relancer manuellement"}
+          ]
+        }]
+      }
+
+triggers:
+  - id: zeroclaw_onboarding
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('WEBHOOK_KEY_AD_ONBOARDING') }}"

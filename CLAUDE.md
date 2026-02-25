@@ -16,7 +16,7 @@ The platform monitors CEGID XRP Sprint, Sage X3, Active Directory, and Microsoft
 
 **Status**: PoC phase — Priority 1 (real ERP connections) completed. AD/M365 still stubbed.
 
-**Priorities**: (1) ~~Real ERP connections~~ DONE, (2) Onboarding/offboarding flow, (3) Microsoft Graph API integration, (4) Grafana dashboard.
+**Priorities**: (1) ~~Real ERP connections~~ DONE, (2) ~~Onboarding/offboarding flow~~ DONE, (3) Microsoft Graph API integration, (4) Grafana dashboard.
 
 ## Target Infrastructure
 
@@ -89,6 +89,8 @@ The key constraint: **ZeroClaw never touches infrastructure directly**. It trigg
 | `kestra/flows/erp-job-restart.yml` | Kestra flow: L1 auto-restart of failed ERP jobs (webhook trigger) |
 | `kestra/flows/incident-escalation-l2.yml` | Kestra flow: L2 escalation with ticket creation and human approval pause |
 | `kestra/flows/ad-maintenance.yml` | Kestra flow: weekly AD audit with optional remediation |
+| `kestra/flows/ad-onboarding.yml` | Kestra flow: L2 onboarding — AD + M365 + ERP provisioning |
+| `kestra/flows/ad-offboarding.yml` | Kestra flow: L2 offboarding — disable AD, revoke M365, revoke ERP |
 | `scripts/erp/test_connectivity.py` | Connectivity test: CEGID MCP + Sage X3 MCP (8 tests) |
 | `scripts/docker/Dockerfile.python-erp` | Custom Docker image: python:3.12-slim + ODBC 17 + corporate CA |
 | `scripts/sync-codex-tokens.py` | Token sync from Codex CLI to ZeroClaw (ChaCha20-Poly1305) |

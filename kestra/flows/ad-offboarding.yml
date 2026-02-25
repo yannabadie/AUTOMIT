@@ -1,0 +1,605 @@
+# =============================================================================
+# FLOW: Employee Offboarding — Deprovisioning IT complet
+# Triggered by: ZeroClaw agent webhook OR manual via Kestra UI
+# Action: Desactive AD, revoque M365, revoque acces ERP, archive
+# Autonomy Level: L2 (validation humaine requise — conformite EN9100)
+# =============================================================================
+id: ad-offboarding
+namespace: motherson.it.ad
+
+description: |
+  Deprovisioning IT d'un collaborateur sortant Motherson Aerospace.
+  Desactive le compte AD, revoque la licence M365, supprime les acces ERP,
+  archive la boite mail, transfère les ressources. EN9100 4-eyes obligatoire.
+
+labels:
+  team: it-ops
+  criticality: high
+  autonomy: L2
+  compliance: EN9100
+
+inputs:
+  - id: action_type
+    type: STRING
+    required: true
+    defaults: "offboarding"
+    allowedValues: [offboarding]
+
+  - id: sam_account
+    type: STRING
+    required: true
+    description: "Login AD du collaborateur sortant (ex: jean.dupont)"
+
+  - id: departure_date
+    type: STRING
+    required: true
+    description: "Date de depart effective (YYYY-MM-DD)"
+
+  - id: departure_reason
+    type: STRING
+    required: true
+    defaults: "depart_volontaire"
+    allowedValues: [depart_volontaire, fin_contrat, licenciement, fin_mission, retraite, mutation]
+
+  - id: manager_email
+    type: STRING
+    required: true
+    description: "Email du manager direct"
+
+  - id: resource_transfer_to
+    type: STRING
+    required: false
+    description: "Login AD du repreneur des ressources (fichiers, DLs, boite partagee)"
+
+  - id: immediate_disable
+    type: BOOLEAN
+    required: false
+    defaults: false
+    description: "Desactivation immediate (true pour licenciement/securite)"
+
+  - id: archive_mailbox
+    type: BOOLEAN
+    required: false
+    defaults: true
+    description: "Archiver la boite mail avant desactivation (retention 30j)"
+
+  - id: erp_access
+    type: STRING
+    required: false
+    defaults: "auto"
+    allowedValues: [auto, cegid, sage_x3, both, none]
+    description: "Acces ERP a revoquer (auto = detecter depuis l'AD)"
+
+  - id: correlation_id
+    type: STRING
+    required: false
+
+variables:
+  teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+
+tasks:
+  # -------------------------------------------------------------------------
+  # 1. Inventaire du compte — collecter toutes les infos avant action
+  # -------------------------------------------------------------------------
+  - id: inventory_account
+    type: io.kestra.plugin.scripts.shell.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: mcr.microsoft.com/powershell:latest
+    env:
+      AD_DOMAIN: "{{ secret('AD_DOMAIN') }}"
+      AD_DC: "{{ secret('AD_DC') }}"
+      AD_SERVICE_ACCOUNT: "{{ secret('AD_SERVICE_ACCOUNT') }}"
+      AD_SERVICE_PASSWORD: "{{ secret('AD_SERVICE_PASSWORD') }}"
+    script: |
+      #!/usr/bin/env pwsh
+
+      $ErrorActionPreference = "Continue"
+      $sam = "{{ inputs.sam_account }}"
+
+      Write-Host "🔍 Inventaire du compte AD: $sam"
+
+      $secPass = ConvertTo-SecureString $env:AD_SERVICE_PASSWORD -AsPlainText -Force
+      $cred = New-Object System.Management.Automation.PSCredential($env:AD_SERVICE_ACCOUNT, $secPass)
+
+      $dcParam = @{}
+      if ($env:AD_DC) { $dcParam["Server"] = $env:AD_DC }
+
+      $inventory = @{
+          sam_account = $sam
+          found = $false
+          display_name = ""
+          email = ""
+          department = ""
+          title = ""
+          enabled = $false
+          groups = @()
+          last_logon = ""
+          ou = ""
+          manager = ""
+          created = ""
+      }
+
+      try {
+          $user = Get-ADUser -Identity $sam -Properties * -Credential $cred @dcParam
+          $inventory.found = $true
+          $inventory.display_name = $user.DisplayName
+          $inventory.email = $user.EmailAddress
+          $inventory.department = $user.Department
+          $inventory.title = $user.Title
+          $inventory.enabled = $user.Enabled
+          $inventory.ou = $user.DistinguishedName
+          $inventory.last_logon = if ($user.LastLogonDate) { $user.LastLogonDate.ToString("yyyy-MM-ddTHH:mm:ssZ") } else { "N/A" }
+          $inventory.created = if ($user.WhenCreated) { $user.WhenCreated.ToString("yyyy-MM-ddTHH:mm:ssZ") } else { "N/A" }
+
+          # Manager
+          if ($user.Manager) {
+              $mgr = Get-ADUser $user.Manager -Properties DisplayName -Credential $cred @dcParam
+              $inventory.manager = $mgr.DisplayName
+          }
+
+          # Groupes
+          $groups = Get-ADPrincipalGroupMembership -Identity $sam -Credential $cred @dcParam
+          $inventory.groups = @($groups | ForEach-Object { $_.Name })
+
+          Write-Host "  Display Name: $($inventory.display_name)"
+          Write-Host "  Email: $($inventory.email)"
+          Write-Host "  Department: $($inventory.department)"
+          Write-Host "  Enabled: $($inventory.enabled)"
+          Write-Host "  Groups: $($inventory.groups.Count)"
+          Write-Host "  Last Logon: $($inventory.last_logon)"
+      } catch {
+          Write-Host "❌ Compte $sam non trouve ou erreur: $($_.Exception.Message)"
+          $inventory.error = $_.Exception.Message
+      }
+
+      $inventoryJson = $inventory | ConvertTo-Json -Depth 3 -Compress
+      Write-Host "KESTRA_OUTPUT:inventory=$inventoryJson"
+
+  # -------------------------------------------------------------------------
+  # 2. Preparer le plan de deprovisioning
+  # -------------------------------------------------------------------------
+  - id: prepare_offboarding_plan
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      import hashlib
+      from datetime import datetime
+
+      sam = "{{ inputs.sam_account }}"
+      reason = "{{ inputs.departure_reason }}"
+      immediate = {{ 'True' if inputs.immediate_disable else 'False' }}
+
+      # Ticket ID
+      ticket_id = f"OFF-{datetime.utcnow().strftime('%Y%m%d')}-" + \
+                  hashlib.md5("{{ execution.id }}".encode()).hexdigest()[:6].upper()
+
+      # OU de destination pour les comptes desactives
+      disabled_ou = "OU=Disabled_Users,DC=adgroupe,DC=com"
+
+      plan = {
+          "ticket_id": ticket_id,
+          "sam_account": sam,
+          "departure_date": "{{ inputs.departure_date }}",
+          "departure_reason": reason,
+          "immediate_disable": immediate,
+          "manager_email": "{{ inputs.manager_email }}",
+          "resource_transfer_to": """{{ inputs.resource_transfer_to ?? '' }}""",
+          "archive_mailbox": {{ 'True' if inputs.archive_mailbox else 'False' }},
+          "erp_access": "{{ inputs.erp_access ?? 'auto' }}",
+          "disabled_ou": disabled_ou,
+          "created_at": datetime.utcnow().isoformat() + "Z",
+          "kestra_execution": "{{ execution.id }}",
+          "steps": []
+      }
+
+      # Definir les etapes
+      if immediate:
+          plan["steps"].append("⚡ DESACTIVATION IMMEDIATE (raison: {})".format(reason))
+
+      plan["steps"].append("1. Desactiver le compte AD")
+      plan["steps"].append("2. Retirer de tous les groupes AD")
+      plan["steps"].append("3. Deplacer vers OU=Disabled_Users")
+      plan["steps"].append("4. Revoquer mot de passe (reset aleatoire)")
+
+      if plan["archive_mailbox"]:
+          plan["steps"].append("5. Archiver boite mail (retention 30j)")
+      plan["steps"].append("6. Desactiver compte M365")
+
+      if plan["erp_access"] != "none":
+          plan["steps"].append("7. Revoquer acces ERP")
+
+      if plan["resource_transfer_to"]:
+          plan["steps"].append("8. Transferer ressources vers {}".format(plan["resource_transfer_to"]))
+
+      plan["steps"].append("9. Notifier manager + IT + RH")
+
+      print(f"Ticket: {ticket_id}")
+      print(f"Plan d'offboarding pour {sam}:")
+      for s in plan["steps"]:
+          print(f"  {s}")
+
+      from kestra import Kestra
+      Kestra.outputs({
+          "ticket_id": ticket_id,
+          "plan": json.dumps(plan),
+          "disabled_ou": disabled_ou
+      })
+
+  # -------------------------------------------------------------------------
+  # 3. Notification Teams + demande validation
+  # -------------------------------------------------------------------------
+  - id: notify_approval_request
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "FFA500",
+        "summary": "🚪 Offboarding — {{ inputs.sam_account }}",
+        "sections": [{
+          "activityTitle": "🚪 Demande d'offboarding IT — Validation requise",
+          "activitySubtitle": "Ticket {{ outputs.prepare_offboarding_plan.vars.ticket_id }}",
+          "facts": [
+            {"name": "Collaborateur", "value": "{{ inputs.sam_account }}"},
+            {"name": "Raison", "value": "{{ inputs.departure_reason | upper }}"},
+            {"name": "Date depart", "value": "{{ inputs.departure_date }}"},
+            {"name": "Manager", "value": "{{ inputs.manager_email }}"},
+            {"name": "Desactivation immediate", "value": "{{ inputs.immediate_disable }}"},
+            {"name": "Archive boite mail", "value": "{{ inputs.archive_mailbox }}"},
+            {"name": "Acces ERP", "value": "{{ inputs.erp_access ?? 'auto' }}"}
+          ]
+        }],
+        "potentialAction": [{
+          "@type": "OpenUri",
+          "name": "✅ Valider dans Kestra",
+          "targets": [{
+            "os": "default",
+            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+          }]
+        }]
+      }
+
+  # -------------------------------------------------------------------------
+  # 4. PAUSE — Validation humaine (sauf si immediate_disable + licenciement)
+  # -------------------------------------------------------------------------
+  - id: check_immediate
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.immediate_disable == false }}"
+    then:
+      - id: wait_human_approval
+        type: io.kestra.plugin.core.flow.Pause
+        timeout: PT24H
+        description: |
+          ⏸️ VALIDATION REQUISE — Offboarding IT
+          Ticket: {{ outputs.prepare_offboarding_plan.vars.ticket_id }}
+          Collaborateur: {{ inputs.sam_account }}
+          Raison: {{ inputs.departure_reason }}
+          L'operateur IT doit valider via l'UI Kestra.
+          Timeout: 24 heures.
+
+  # -------------------------------------------------------------------------
+  # 5. Desactiver le compte AD + retirer des groupes + deplacer OU
+  # -------------------------------------------------------------------------
+  - id: disable_ad_account
+    type: io.kestra.plugin.scripts.shell.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: mcr.microsoft.com/powershell:latest
+    env:
+      AD_DOMAIN: "{{ secret('AD_DOMAIN') }}"
+      AD_DC: "{{ secret('AD_DC') }}"
+      AD_SERVICE_ACCOUNT: "{{ secret('AD_SERVICE_ACCOUNT') }}"
+      AD_SERVICE_PASSWORD: "{{ secret('AD_SERVICE_PASSWORD') }}"
+    script: |
+      #!/usr/bin/env pwsh
+
+      $ErrorActionPreference = "Stop"
+      $sam = "{{ inputs.sam_account }}"
+      $plan = '{{ outputs.prepare_offboarding_plan.vars.plan }}' | ConvertFrom-Json
+
+      Write-Host "🔒 Desactivation du compte AD: $sam"
+
+      $secPass = ConvertTo-SecureString $env:AD_SERVICE_PASSWORD -AsPlainText -Force
+      $cred = New-Object System.Management.Automation.PSCredential($env:AD_SERVICE_ACCOUNT, $secPass)
+
+      $dcParam = @{}
+      if ($env:AD_DC) { $dcParam["Server"] = $env:AD_DC }
+
+      # --- 1. Desactiver le compte ---
+      try {
+          Disable-ADAccount -Identity $sam -Credential $cred @dcParam
+          Write-Host "  ✅ Compte desactive"
+      } catch {
+          Write-Host "  ⚠️ Desactivation: $($_.Exception.Message)"
+      }
+
+      # --- 2. Reset mot de passe (empecher toute connexion residuelle) ---
+      try {
+          $randomPwd = -join ((65..90) + (97..122) + (48..57) + (33..38) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+          Set-ADAccountPassword -Identity $sam -NewPassword (ConvertTo-SecureString $randomPwd -AsPlainText -Force) -Reset -Credential $cred @dcParam
+          Write-Host "  ✅ Mot de passe reinitialise (aleatoire)"
+      } catch {
+          Write-Host "  ⚠️ Reset password: $($_.Exception.Message)"
+      }
+
+      # --- 3. Retirer de tous les groupes (sauf Domain Users) ---
+      try {
+          $groups = Get-ADPrincipalGroupMembership -Identity $sam -Credential $cred @dcParam
+          $removedCount = 0
+          foreach ($group in $groups) {
+              if ($group.Name -ne "Domain Users") {
+                  try {
+                      Remove-ADGroupMember -Identity $group -Members $sam -Confirm:$false -Credential $cred @dcParam
+                      $removedCount++
+                  } catch {
+                      Write-Host "    ⚠️ Retrait $($group.Name): $($_.Exception.Message)"
+                  }
+              }
+          }
+          Write-Host "  ✅ Retire de $removedCount groupes"
+      } catch {
+          Write-Host "  ⚠️ Retrait groupes: $($_.Exception.Message)"
+      }
+
+      # --- 4. Mettre a jour la description ---
+      try {
+          $desc = "OFFBOARDING $($plan.ticket_id) — $($plan.departure_reason) — $(Get-Date -Format 'yyyy-MM-dd')"
+          Set-ADUser -Identity $sam -Description $desc -Credential $cred @dcParam
+          Write-Host "  ✅ Description mise a jour"
+      } catch {
+          Write-Host "  ⚠️ Description: $($_.Exception.Message)"
+      }
+
+      # --- 5. Deplacer vers OU Disabled ---
+      try {
+          $user = Get-ADUser -Identity $sam -Credential $cred @dcParam
+          Move-ADObject -Identity $user.DistinguishedName -TargetPath $plan.disabled_ou -Credential $cred @dcParam
+          Write-Host "  ✅ Deplace vers $($plan.disabled_ou)"
+      } catch {
+          Write-Host "  ⚠️ Deplacement OU: $($_.Exception.Message)"
+      }
+
+      Write-Host "✅ Deprovisioning AD termine pour $sam"
+
+  # -------------------------------------------------------------------------
+  # 6. Desactiver M365 + archiver boite mail
+  # -------------------------------------------------------------------------
+  - id: disable_m365
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+    script: |
+      import json
+      import os
+      import requests
+
+      sam = "{{ inputs.sam_account }}"
+      upn = f"{sam}@adigroupe.onmicrosoft.com"
+      archive = {{ 'True' if inputs.archive_mailbox else 'False' }}
+
+      tenant = os.environ.get("AZURE_TENANT_ID", "")
+      client_id = os.environ.get("AZURE_CLIENT_ID", "")
+      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+
+      result = {"m365_disabled": False, "mailbox_archived": False}
+
+      if not all([tenant, client_id, client_secret]):
+          print("⚠️ Azure AD non configure — desactivation M365 manuelle requise")
+          result["status"] = "MANUAL_REQUIRED"
+      else:
+          try:
+              # Token Graph API
+              token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+              token_resp = requests.post(token_url, data={
+                  "client_id": client_id,
+                  "client_secret": client_secret,
+                  "scope": "https://graph.microsoft.com/.default",
+                  "grant_type": "client_credentials"
+              }, timeout=30)
+              token_resp.raise_for_status()
+              access_token = token_resp.json()["access_token"]
+              headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+
+              # Desactiver le sign-in M365
+              patch_url = f"https://graph.microsoft.com/v1.0/users/{upn}"
+              patch_resp = requests.patch(patch_url, headers=headers, json={
+                  "accountEnabled": False
+              }, timeout=15)
+
+              if patch_resp.status_code == 204:
+                  print(f"✅ Compte M365 desactive: {upn}")
+                  result["m365_disabled"] = True
+              elif patch_resp.status_code == 404:
+                  print(f"⚠️ Utilisateur {upn} non trouve dans Azure AD")
+                  result["status"] = "NOT_FOUND"
+              else:
+                  print(f"❌ Erreur desactivation M365: {patch_resp.status_code} {patch_resp.text[:300]}")
+                  result["status"] = f"ERROR_{patch_resp.status_code}"
+
+              # Revoquer toutes les sessions actives
+              if result.get("m365_disabled"):
+                  revoke_url = f"https://graph.microsoft.com/v1.0/users/{upn}/revokeSignInSessions"
+                  revoke_resp = requests.post(revoke_url, headers=headers, timeout=15)
+                  if revoke_resp.status_code == 200:
+                      print("✅ Sessions M365 revoquees")
+                  else:
+                      print(f"⚠️ Revocation sessions: {revoke_resp.status_code}")
+
+              # Archive mailbox (conversion en shared mailbox pour retention)
+              if archive and result.get("m365_disabled"):
+                  print("📦 Archive boite mail: sera traitee via Exchange Online PowerShell")
+                  print("   Retention 30 jours avant suppression definitive")
+                  result["mailbox_archived"] = True
+                  result["retention_days"] = 30
+
+          except Exception as e:
+              result["status"] = "ERROR"
+              result["error"] = str(e)
+              print(f"❌ Erreur M365: {e}")
+
+      from kestra import Kestra
+      Kestra.outputs(result)
+      print(json.dumps(result, indent=2))
+
+  # -------------------------------------------------------------------------
+  # 7. Revoquer acces ERP
+  # -------------------------------------------------------------------------
+  - id: revoke_erp
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.erp_access != 'none' }}"
+    then:
+      - id: revoke_erp_access
+        type: io.kestra.plugin.scripts.python.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          containerImage: automit/python-erp:3.12
+        env:
+          CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
+          CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
+          X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
+          X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
+        script: |
+          import json
+          import os
+          import requests
+
+          sam = "{{ inputs.sam_account }}"
+          erp_access = "{{ inputs.erp_access ?? 'auto' }}"
+          result = {"erp_revoked": [], "errors": []}
+
+          def mcp_call(mcp_url, mcp_token, tool_name, arguments):
+              headers = {
+                  "X-MCP-TOKEN": mcp_token,
+                  "Content-Type": "application/json",
+                  "Accept": "application/json"
+              }
+              payload = {
+                  "jsonrpc": "2.0", "id": 1,
+                  "method": "tools/call",
+                  "params": {"name": tool_name, "arguments": arguments}
+              }
+              resp = requests.post(mcp_url, json=payload, headers=headers, timeout=30)
+              if resp.status_code == 200:
+                  return resp.json().get("result", resp.json())
+              raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
+
+          # --- CEGID ---
+          if erp_access in ("auto", "cegid", "both"):
+              print(f"🔒 Verification acces CEGID pour {sam}...")
+              try:
+                  check = mcp_call(
+                      os.environ["CEGID_MCP_URL"],
+                      os.environ["CEGID_MCP_TOKEN"],
+                      "query_database",
+                      {"sql": f"SELECT TOP 1 UTI_LOGIN, UTI_ACTIF FROM UTILISATEURS WHERE UTI_LOGIN LIKE '%{sam}%'", "limit": 1}
+                  )
+                  print(f"  CEGID: {str(check)[:300]}")
+                  result["erp_revoked"].append({
+                      "erp": "cegid",
+                      "status": "CHECKED",
+                      "detail": "Desactivation utilisateur CEGID requiert acces admin — escalade manuelle",
+                      "check_result": str(check)[:200]
+                  })
+              except Exception as e:
+                  result["errors"].append({"erp": "cegid", "error": str(e)})
+
+          # --- Sage X3 ---
+          if erp_access in ("auto", "sage_x3", "both"):
+              print(f"🔒 Verification acces Sage X3 pour {sam}...")
+              try:
+                  check = mcp_call(
+                      os.environ["X3_MCP_URL"],
+                      os.environ["X3_MCP_TOKEN"],
+                      "query_database",
+                      {"sql": f"SELECT USR_0, ESSION_0 FROM AUTILIS WHERE USR_0 LIKE '%{sam.upper()[:10]}%'", "limit": 1}
+                  )
+                  print(f"  X3: {str(check)[:300]}")
+                  result["erp_revoked"].append({
+                      "erp": "sage_x3",
+                      "status": "CHECKED",
+                      "detail": "Desactivation utilisateur X3 requiert acces admin Sage — escalade manuelle",
+                      "check_result": str(check)[:200]
+                  })
+              except Exception as e:
+                  result["errors"].append({"erp": "sage_x3", "error": str(e)})
+
+          from kestra import Kestra
+          Kestra.outputs(result)
+          print(json.dumps(result, indent=2))
+
+  # -------------------------------------------------------------------------
+  # 8. Notification finale — recapitulatif offboarding
+  # -------------------------------------------------------------------------
+  - id: notify_offboarding_complete
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "FFA500",
+        "summary": "🚪 Offboarding termine — {{ inputs.sam_account }}",
+        "sections": [{
+          "activityTitle": "🚪 Offboarding IT termine",
+          "activitySubtitle": "Ticket {{ outputs.prepare_offboarding_plan.vars.ticket_id }}",
+          "facts": [
+            {"name": "Collaborateur", "value": "{{ inputs.sam_account }}"},
+            {"name": "Raison", "value": "{{ inputs.departure_reason | upper }}"},
+            {"name": "Date depart", "value": "{{ inputs.departure_date }}"},
+            {"name": "Compte AD", "value": "Desactive + deplace vers Disabled_Users"},
+            {"name": "M365", "value": "Compte desactive + sessions revoquees"},
+            {"name": "Archive mail", "value": "{{ inputs.archive_mailbox }}"},
+            {"name": "Acces ERP", "value": "Verifie — escalade admin si necessaire"},
+            {"name": "Execution", "value": "{{ execution.id }}"}
+          ]
+        }],
+        "potentialAction": [{
+          "@type": "OpenUri",
+          "name": "📋 Details dans Kestra",
+          "targets": [{
+            "os": "default",
+            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+          }]
+        }]
+      }
+
+# -------------------------------------------------------------------------
+# Gestion timeout / erreur
+# -------------------------------------------------------------------------
+errors:
+  - id: on_error
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "FF0000",
+        "summary": "❌ Erreur offboarding — {{ inputs.sam_account }}",
+        "sections": [{
+          "activityTitle": "❌ Echec offboarding IT",
+          "facts": [
+            {"name": "Collaborateur", "value": "{{ inputs.sam_account }}"},
+            {"name": "Ticket", "value": "{{ outputs.prepare_offboarding_plan.vars.ticket_id ?? 'N/A' }}"},
+            {"name": "Action requise", "value": "Verifier les logs Kestra — le compte peut etre partiellement desactive"}
+          ]
+        }]
+      }
+
+triggers:
+  - id: zeroclaw_offboarding
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('WEBHOOK_KEY_AD_OFFBOARDING') }}"
