@@ -66,9 +66,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
-    beforeCommands:
-      - pip install requests --quiet
+      containerImage: automit/python-erp:3.12
     script: |
       import json
       import hashlib
@@ -156,7 +154,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
+      containerImage: automit/python-erp:3.12
     script: |
       import json
       print("✅ Validation humaine reçue — exécution des actions correctives")

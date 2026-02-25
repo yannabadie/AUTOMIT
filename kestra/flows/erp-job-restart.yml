@@ -75,20 +75,17 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
+      containerImage: automit/python-erp:3.12
     env:
-      CEGID_DB_HOST: "{{ secret('CEGID_DB_HOST') }}"
-      CEGID_DB_NAME: "{{ secret('CEGID_DB_NAME') }}"
-      CEGID_DB_USER: "{{ secret('CEGID_DB_USER') }}"
-      CEGID_DB_PASSWORD: "{{ secret('CEGID_DB_PASSWORD') }}"
+      CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
+      CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
       X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
       X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
-    beforeCommands:
-      - pip install pyodbc requests --quiet
     script: |
       import json
       import os
       import sys
+      import requests
 
       erp = "{{ inputs.erp_system }}"
       job = "{{ inputs.job_name }}"
@@ -98,23 +95,45 @@ tasks:
           "status": "UNKNOWN", "can_restart": False
       }
 
-      # --- CEGID XRP Sprint (SQL direct) ---
-      if erp == "cegid":
-          import pyodbc
-          try:
-              conn_str = (
-                  f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-                  f"SERVER={os.environ['CEGID_DB_HOST']};"
-                  f"DATABASE={os.environ['CEGID_DB_NAME']};"
-                  f"UID={os.environ['CEGID_DB_USER']};"
-                  f"PWD={os.environ['CEGID_DB_PASSWORD']};"
-                  f"TrustServerCertificate=yes;Encrypt=yes;"
-              )
-              conn = pyodbc.connect(conn_str, timeout=30)
-              cursor = conn.cursor()
+      def mcp_call(mcp_url, mcp_token, tool_name, arguments):
+          """Call an MCP tool via JSON-RPC."""
+          headers = {
+              "X-MCP-TOKEN": mcp_token,
+              "Content-Type": "application/json",
+              "Accept": "application/json"
+          }
+          payload = {
+              "jsonrpc": "2.0", "id": 1,
+              "method": "tools/call",
+              "params": {"name": tool_name, "arguments": arguments}
+          }
+          resp = requests.post(mcp_url, json=payload, headers=headers, timeout=30)
+          if resp.status_code == 200:
+              data = resp.json()
+              if "error" in data:
+                  raise Exception(f"MCP error: {data['error']}")
+              return data.get("result", data)
+          raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
 
-              # Chercher le job SQL Agent par nom
-              cursor.execute("""
+      def parse_mcp_query_result(result):
+          """Extract rows from MCP query_database response."""
+          if isinstance(result, dict) and "content" in result:
+              for item in result["content"]:
+                  if item.get("type") == "text":
+                      data = json.loads(item["text"]) if isinstance(item["text"], str) else item["text"]
+                      if isinstance(data, dict) and "rows" in data:
+                          return data["rows"]
+                      elif isinstance(data, list):
+                          return data
+                      return [data]
+          return []
+
+      # --- CEGID XRP Sprint (via MCP cegid-oracle) ---
+      if erp == "cegid":
+          mcp_url = os.environ["CEGID_MCP_URL"]
+          mcp_token = os.environ["CEGID_MCP_TOKEN"]
+          try:
+              sql = f"""
                   SELECT TOP 1
                       j.name,
                       h.run_status,
@@ -124,24 +143,33 @@ tasks:
                            3, 0, ':'), 6, 0, ':') AS DATETIME) AS last_run
                   FROM msdb.dbo.sysjobhistory h
                   JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
-                  WHERE j.name LIKE ?
+                  WHERE j.name LIKE '%{job}%'
                   AND h.step_id = 0
                   ORDER BY h.instance_id DESC
-              """, f"%{job}%")
-              row = cursor.fetchone()
+              """
+              result = mcp_call(mcp_url, mcp_token, "query_database", {"sql": sql, "limit": 1})
+              rows = parse_mcp_query_result(result)
 
-              if row:
-                  run_status_map = {0: "FAILED", 1: "SUCCESS", 2: "RETRY", 3: "CANCELLED"}
-                  status["status"] = run_status_map.get(row[1], "UNKNOWN")
-                  status["error_message"] = row[2][:500] if row[2] else ""
-                  status["last_run"] = row[3].isoformat() + "Z" if row[3] else ""
-                  status["can_restart"] = status["status"] in ("FAILED", "CANCELLED")
+              if rows:
+                  row = rows[0]
+                  if isinstance(row, dict):
+                      run_status = row.get("run_status", -1)
+                      run_status_map = {0: "FAILED", 1: "SUCCESS", 2: "RETRY", 3: "CANCELLED"}
+                      status["status"] = run_status_map.get(run_status, "UNKNOWN")
+                      status["error_message"] = str(row.get("message", ""))[:500]
+                      status["last_run"] = str(row.get("last_run", ""))
+                      status["can_restart"] = status["status"] in ("FAILED", "CANCELLED")
+                  elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                      run_status_map = {0: "FAILED", 1: "SUCCESS", 2: "RETRY", 3: "CANCELLED"}
+                      status["status"] = run_status_map.get(row[1], "UNKNOWN")
+                      status["error_message"] = str(row[2])[:500] if len(row) > 2 and row[2] else ""
+                      status["last_run"] = str(row[3]) if len(row) > 3 and row[3] else ""
+                      status["can_restart"] = status["status"] in ("FAILED", "CANCELLED")
               else:
                   status["status"] = "NOT_FOUND"
                   status["error_message"] = f"Aucun job correspondant a '{job}'"
                   status["can_restart"] = False
 
-              conn.close()
           except Exception as e:
               status["status"] = "ERROR"
               status["error_message"] = str(e)
@@ -149,37 +177,20 @@ tasks:
 
       # --- Sage X3 (via MCP x3-oracle) ---
       elif erp == "sage_x3":
-          import requests
           try:
-              mcp_url = os.environ["X3_MCP_URL"]
-              headers = {
-                  "X-MCP-TOKEN": os.environ["X3_MCP_TOKEN"],
-                  "Content-Type": "application/json"
-              }
-              rpc_payload = {
-                  "jsonrpc": "2.0", "id": 1,
-                  "method": "tools/call",
-                  "params": {
-                      "name": "batch_status",
-                      "arguments": {"job_name": job}
-                  }
-              }
-              resp = requests.post(mcp_url, json=rpc_payload, headers=headers, timeout=30)
-              if resp.status_code == 200:
-                  data = resp.json()
-                  result = data.get("result", {})
-                  if isinstance(result, dict):
-                      status["status"] = result.get("status", "UNKNOWN")
-                      status["error_message"] = result.get("error", "")
-                      status["last_run"] = result.get("last_run", "")
-                      status["can_restart"] = result.get("can_restart", False)
-                  else:
-                      status["status"] = "MCP_RESPONSE"
-                      status["detail"] = str(result)[:500]
-                      status["can_restart"] = True
+              result = mcp_call(
+                  os.environ["X3_MCP_URL"], os.environ["X3_MCP_TOKEN"],
+                  "batch_status", {"job_name": job}
+              )
+              if isinstance(result, dict):
+                  status["status"] = result.get("status", "UNKNOWN")
+                  status["error_message"] = result.get("error", "")
+                  status["last_run"] = result.get("last_run", "")
+                  status["can_restart"] = result.get("can_restart", False)
               else:
-                  status["status"] = "MCP_ERROR"
-                  status["error_message"] = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                  status["status"] = "MCP_RESPONSE"
+                  status["detail"] = str(result)[:500]
+                  status["can_restart"] = True
           except Exception as e:
               status["status"] = "ERROR"
               status["error_message"] = str(e)
@@ -200,80 +211,69 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
+      containerImage: automit/python-erp:3.12
     env:
-      CEGID_DB_HOST: "{{ secret('CEGID_DB_HOST') }}"
-      CEGID_DB_NAME: "{{ secret('CEGID_DB_NAME') }}"
-      CEGID_DB_USER: "{{ secret('CEGID_DB_USER') }}"
-      CEGID_DB_PASSWORD: "{{ secret('CEGID_DB_PASSWORD') }}"
+      CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
+      CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
       X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
       X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
-    beforeCommands:
-      - pip install pyodbc requests --quiet
     script: |
       import json
       import os
       import sys
+      import requests
 
       erp = "{{ inputs.erp_system }}"
       job = "{{ inputs.job_name }}"
       result = {"erp": erp, "job": job, "success": False}
 
+      def mcp_call(mcp_url, mcp_token, tool_name, arguments, timeout=60):
+          """Call an MCP tool via JSON-RPC."""
+          headers = {
+              "X-MCP-TOKEN": mcp_token,
+              "Content-Type": "application/json",
+              "Accept": "application/json"
+          }
+          payload = {
+              "jsonrpc": "2.0", "id": 1,
+              "method": "tools/call",
+              "params": {"name": tool_name, "arguments": arguments}
+          }
+          resp = requests.post(mcp_url, json=payload, headers=headers, timeout=timeout)
+          if resp.status_code == 200:
+              data = resp.json()
+              if "error" in data:
+                  raise Exception(f"MCP error: {data['error']}")
+              return data.get("result", data)
+          raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
+
+      # --- CEGID XRP Sprint (via MCP cegid-oracle) ---
       if erp == "cegid":
-          import pyodbc
+          mcp_url = os.environ["CEGID_MCP_URL"]
+          mcp_token = os.environ["CEGID_MCP_TOKEN"]
           try:
-              conn_str = (
-                  f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-                  f"SERVER={os.environ['CEGID_DB_HOST']};"
-                  f"DATABASE=msdb;"
-                  f"UID={os.environ['CEGID_DB_USER']};"
-                  f"PWD={os.environ['CEGID_DB_PASSWORD']};"
-                  f"TrustServerCertificate=yes;Encrypt=yes;"
-              )
-              conn = pyodbc.connect(conn_str, timeout=30)
-              cursor = conn.cursor()
-
-              # Lancer le job SQL Agent via sp_start_job
-              cursor.execute("EXEC msdb.dbo.sp_start_job @job_name = ?", job)
-              conn.commit()
-              conn.close()
-
+              # Relancer le job SQL Agent via query_database (EXEC sp_start_job)
+              sql = f"EXEC msdb.dbo.sp_start_job @job_name = N'{job}'"
+              resp_data = mcp_call(mcp_url, mcp_token, "query_database", {"sql": sql})
               result["success"] = True
-              result["message"] = f"Job '{job}' demarre via sp_start_job"
-              print(f"[CEGID] Job {job} relance avec succes")
+              result["message"] = f"Job '{job}' demarre via MCP cegid-oracle (sp_start_job)"
+              result["mcp_response"] = str(resp_data)[:500]
+              print(f"[CEGID] Job {job} relance via MCP cegid-oracle")
           except Exception as e:
               result["error"] = str(e)
               print(f"[CEGID] Echec relance job {job}: {e}")
               sys.exit(1)
 
+      # --- Sage X3 (via MCP x3-oracle) ---
       elif erp == "sage_x3":
-          import requests
           try:
-              headers = {
-                  "X-MCP-TOKEN": os.environ["X3_MCP_TOKEN"],
-                  "Content-Type": "application/json"
-              }
-              rpc_payload = {
-                  "jsonrpc": "2.0", "id": 1,
-                  "method": "tools/call",
-                  "params": {
-                      "name": "batch_restart",
-                      "arguments": {"job_name": job}
-                  }
-              }
-              resp = requests.post(
-                  os.environ["X3_MCP_URL"],
-                  json=rpc_payload, headers=headers, timeout=60
+              resp_data = mcp_call(
+                  os.environ["X3_MCP_URL"], os.environ["X3_MCP_TOKEN"],
+                  "batch_restart", {"job_name": job}
               )
-              if resp.status_code == 200:
-                  data = resp.json()
-                  result["success"] = True
-                  result["mcp_response"] = data.get("result", str(data))
-                  print(f"[Sage X3] Job {job} relance via MCP x3-oracle")
-              else:
-                  result["error"] = f"HTTP {resp.status_code}: {resp.text[:300]}"
-                  print(f"[Sage X3] Echec MCP: {result['error']}")
-                  sys.exit(1)
+              result["success"] = True
+              result["mcp_response"] = resp_data if isinstance(resp_data, (dict, str)) else str(resp_data)
+              print(f"[Sage X3] Job {job} relance via MCP x3-oracle")
           except Exception as e:
               result["error"] = str(e)
               print(f"[Sage X3] Echec relance: {e}")
@@ -293,20 +293,17 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
+      containerImage: automit/python-erp:3.12
     env:
-      CEGID_DB_HOST: "{{ secret('CEGID_DB_HOST') }}"
-      CEGID_DB_NAME: "{{ secret('CEGID_DB_NAME') }}"
-      CEGID_DB_USER: "{{ secret('CEGID_DB_USER') }}"
-      CEGID_DB_PASSWORD: "{{ secret('CEGID_DB_PASSWORD') }}"
+      CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
+      CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
       X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
       X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
-    beforeCommands:
-      - pip install pyodbc requests --quiet
     script: |
       import json
       import os
       import time
+      import requests
 
       erp = "{{ inputs.erp_system }}"
       job = "{{ inputs.job_name }}"
@@ -316,50 +313,72 @@ tasks:
 
       result = {"job": job, "post_restart_status": "UNKNOWN", "verified": False}
 
+      def mcp_call(mcp_url, mcp_token, tool_name, arguments):
+          """Call an MCP tool via JSON-RPC."""
+          headers = {
+              "X-MCP-TOKEN": mcp_token,
+              "Content-Type": "application/json",
+              "Accept": "application/json"
+          }
+          payload = {
+              "jsonrpc": "2.0", "id": 1,
+              "method": "tools/call",
+              "params": {"name": tool_name, "arguments": arguments}
+          }
+          resp = requests.post(mcp_url, json=payload, headers=headers, timeout=30)
+          if resp.status_code == 200:
+              data = resp.json()
+              if "error" in data:
+                  raise Exception(f"MCP error: {data['error']}")
+              return data.get("result", data)
+          raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
+
+      def parse_mcp_query_result(result):
+          """Extract rows from MCP query_database response."""
+          if isinstance(result, dict) and "content" in result:
+              for item in result["content"]:
+                  if item.get("type") == "text":
+                      data = json.loads(item["text"]) if isinstance(item["text"], str) else item["text"]
+                      if isinstance(data, dict) and "rows" in data:
+                          return data["rows"]
+                      elif isinstance(data, list):
+                          return data
+                      return [data]
+          return []
+
+      # --- CEGID XRP Sprint (via MCP cegid-oracle) ---
       if erp == "cegid":
-          import pyodbc
+          mcp_url = os.environ["CEGID_MCP_URL"]
+          mcp_token = os.environ["CEGID_MCP_TOKEN"]
           try:
-              conn_str = (
-                  f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-                  f"SERVER={os.environ['CEGID_DB_HOST']};"
-                  f"DATABASE={os.environ['CEGID_DB_NAME']};"
-                  f"UID={os.environ['CEGID_DB_USER']};"
-                  f"PWD={os.environ['CEGID_DB_PASSWORD']};"
-                  f"TrustServerCertificate=yes;Encrypt=yes;"
-              )
-              conn = pyodbc.connect(conn_str, timeout=30)
-              cursor = conn.cursor()
-              cursor.execute("""
+              sql = f"""
                   SELECT TOP 1 h.run_status
                   FROM msdb.dbo.sysjobhistory h
                   JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
-                  WHERE j.name LIKE ? AND h.step_id = 0
+                  WHERE j.name LIKE '%{job}%' AND h.step_id = 0
                   ORDER BY h.instance_id DESC
-              """, f"%{job}%")
-              row = cursor.fetchone()
-              conn.close()
+              """
+              mcp_result = mcp_call(mcp_url, mcp_token, "query_database", {"sql": sql, "limit": 1})
+              rows = parse_mcp_query_result(mcp_result)
 
-              if row:
+              if rows:
+                  row = rows[0]
                   status_map = {0: "FAILED", 1: "SUCCESS", 2: "RETRY", 3: "CANCELLED"}
-                  result["post_restart_status"] = status_map.get(row[0], "UNKNOWN")
+                  run_status = row.get("run_status", row[0] if isinstance(row, (list, tuple)) else -1)
+                  result["post_restart_status"] = status_map.get(run_status, "UNKNOWN")
                   result["verified"] = True
           except Exception as e:
               result["error"] = str(e)
 
+      # --- Sage X3 (via MCP x3-oracle) ---
       elif erp == "sage_x3":
-          import requests
           try:
-              headers = {"X-MCP-TOKEN": os.environ["X3_MCP_TOKEN"], "Content-Type": "application/json"}
-              rpc_payload = {
-                  "jsonrpc": "2.0", "id": 1,
-                  "method": "tools/call",
-                  "params": {"name": "batch_status", "arguments": {"job_name": job}}
-              }
-              resp = requests.post(os.environ["X3_MCP_URL"], json=rpc_payload, headers=headers, timeout=30)
-              if resp.status_code == 200:
-                  data = resp.json().get("result", {})
-                  result["post_restart_status"] = data.get("status", "UNKNOWN") if isinstance(data, dict) else "MCP_OK"
-                  result["verified"] = True
+              data = mcp_call(
+                  os.environ["X3_MCP_URL"], os.environ["X3_MCP_TOKEN"],
+                  "batch_status", {"job_name": job}
+              )
+              result["post_restart_status"] = data.get("status", "UNKNOWN") if isinstance(data, dict) else "MCP_OK"
+              result["verified"] = True
           except Exception as e:
               result["error"] = str(e)
 

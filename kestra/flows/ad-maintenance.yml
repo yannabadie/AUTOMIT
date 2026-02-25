@@ -39,8 +39,6 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       containerImage: mcr.microsoft.com/powershell:latest
-    beforeCommands:
-      - pwsh -Command "Install-Module -Name ActiveDirectory -Force -Scope CurrentUser -ErrorAction SilentlyContinue"
     script: |
       #!/usr/bin/env pwsh
 
@@ -84,7 +82,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
+      containerImage: automit/python-erp:3.12
     script: |
       import json
       from datetime import datetime

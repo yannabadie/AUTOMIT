@@ -20,30 +20,31 @@ labels:
 
 tasks:
   # -------------------------------------------------------------------------
-  # 1. Check CEGID XRP Sprint
+  # 1. Check CEGID XRP Sprint (via MCP cegid-oracle)
+  # Accès SQL read-only via le MCP server — pas de connexion directe
   # -------------------------------------------------------------------------
   - id: check_cegid
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
+      containerImage: automit/python-erp:3.12
     env:
-      CEGID_DB_HOST: "{{ secret('CEGID_DB_HOST') }}"
-      CEGID_DB_NAME: "{{ secret('CEGID_DB_NAME') }}"
-      CEGID_DB_USER: "{{ secret('CEGID_DB_USER') }}"
-      CEGID_DB_PASSWORD: "{{ secret('CEGID_DB_PASSWORD') }}"
-    beforeCommands:
-      - pip install pyodbc --quiet
+      CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
+      CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
     script: |
       import json
       import os
       import time
+      import requests
       from datetime import datetime
 
-      host = os.environ["CEGID_DB_HOST"]
-      db = os.environ["CEGID_DB_NAME"]
-      user = os.environ["CEGID_DB_USER"]
-      pwd = os.environ["CEGID_DB_PASSWORD"]
+      mcp_url = os.environ["CEGID_MCP_URL"]
+      mcp_token = os.environ["CEGID_MCP_TOKEN"]
+      headers = {
+          "X-MCP-TOKEN": mcp_token,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+      }
 
       checks = {
           "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -52,98 +53,140 @@ tasks:
           "overall_status": "HEALTHY"
       }
 
+      def mcp_call(tool_name, arguments):
+          """Call a CEGID Oracle MCP tool via JSON-RPC."""
+          payload = {
+              "jsonrpc": "2.0", "id": 1,
+              "method": "tools/call",
+              "params": {"name": tool_name, "arguments": arguments}
+          }
+          resp = requests.post(mcp_url, json=payload, headers=headers, timeout=30)
+          if resp.status_code == 200:
+              data = resp.json()
+              if "error" in data:
+                  raise Exception(f"MCP error: {data['error']}")
+              return data.get("result", data)
+          raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
+
+      def mcp_query(sql):
+          """Execute a read-only SQL query via MCP query_database tool."""
+          result = mcp_call("query_database", {"sql": sql, "limit": 100})
+          return result
+
+      # --- Test connexion MCP ---
       try:
-          import pyodbc
-          conn_str = (
-              f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-              f"SERVER={host};"
-              f"DATABASE={db};"
-              f"UID={user};PWD={pwd};"
-              f"TrustServerCertificate=yes;Encrypt=yes;"
-              f"Connection Timeout=30;"
-          )
-
           t0 = time.time()
-          conn = pyodbc.connect(conn_str, timeout=30)
+          resp = requests.get(mcp_url.rstrip("/"), headers=headers, timeout=15)
           response_ms = round((time.time() - t0) * 1000)
-          checks["checks"]["database_connection"] = {
-              "status": "OK", "response_time_ms": response_ms
+          checks["checks"]["mcp_connection"] = {
+              "status": "OK" if resp.status_code < 500 else "CRITICAL",
+              "response_time_ms": response_ms
           }
-
-          cursor = conn.cursor()
-
-          # Sessions actives
-          cursor.execute("""
-              SELECT COUNT(*) FROM sys.dm_exec_sessions
-              WHERE is_user_process = 1
-          """)
-          session_count = cursor.fetchone()[0]
-          checks["checks"]["active_sessions"] = {
-              "count": session_count, "max_allowed": 50,
-              "status": "WARNING" if session_count > 40 else "OK"
-          }
-
-          # Jobs batch — derniers echecs dans la derniere heure
-          cursor.execute("""
-              SELECT COUNT(*) FROM msdb.dbo.sysjobhistory h
-              JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
-              WHERE h.run_status = 0
-              AND DATEDIFF(HOUR,
-                  CAST(CAST(h.run_date AS VARCHAR) + ' ' +
-                       STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR), 6),
-                       3, 0, ':'), 6, 0, ':') AS DATETIME),
-                  GETDATE()) < 1
-          """)
-          failed = cursor.fetchone()[0]
-          cursor.execute("""
-              SELECT COUNT(*) FROM msdb.dbo.sysjobactivity ja
-              JOIN msdb.dbo.sysjobs j ON ja.job_id = j.job_id
-              WHERE ja.start_execution_date IS NOT NULL
-              AND ja.stop_execution_date IS NULL
-          """)
-          running = cursor.fetchone()[0]
-          checks["checks"]["batch_jobs"] = {
-              "running": running, "failed_last_hour": failed,
-              "status": "CRITICAL" if failed > 2 else ("WARNING" if failed > 0 else "OK")
-          }
-
-          # Espace disque (via SQL Server)
-          cursor.execute("""
-              SELECT
-                  SUM(size * 8 / 1024) AS size_mb,
-                  SUM(FILEPROPERTY(name, 'SpaceUsed') * 8 / 1024) AS used_mb
-              FROM sys.database_files
-          """)
-          row = cursor.fetchone()
-          if row and row[0]:
-              pct = round(row[1] / row[0] * 100) if row[0] > 0 else 0
-              checks["checks"]["disk_usage_percent"] = pct
-
-          # Derniere sauvegarde
-          cursor.execute("""
-              SELECT TOP 1 backup_finish_date
-              FROM msdb.dbo.backupset
-              WHERE database_name = ?
-              ORDER BY backup_finish_date DESC
-          """, db)
-          backup_row = cursor.fetchone()
-          if backup_row and backup_row[0]:
-              checks["checks"]["last_backup"] = backup_row[0].isoformat() + "Z"
-
-          conn.close()
-
-          # Statut global
-          statuses = [c.get("status", "OK") for c in checks["checks"].values() if isinstance(c, dict)]
-          if any(s == "CRITICAL" for s in statuses):
-              checks["overall_status"] = "CRITICAL"
-          elif any(s == "WARNING" for s in statuses):
-              checks["overall_status"] = "DEGRADED"
-
       except Exception as e:
-          checks["checks"]["database_connection"] = {
-              "status": "CRITICAL", "error": str(e)
-          }
+          checks["checks"]["mcp_connection"] = {"status": "CRITICAL", "error": str(e)}
           checks["overall_status"] = "CRITICAL"
+
+      # --- Sessions actives ---
+      if checks["checks"].get("mcp_connection", {}).get("status") == "OK":
+          try:
+              result = mcp_query(
+                  "SELECT COUNT(*) AS cnt FROM sys.dm_exec_sessions WHERE is_user_process = 1"
+              )
+              # Parse result — MCP returns content array with text
+              if isinstance(result, dict) and "content" in result:
+                  for item in result["content"]:
+                      if item.get("type") == "text":
+                          data = json.loads(item["text"]) if isinstance(item["text"], str) else item["text"]
+                          if isinstance(data, dict) and "rows" in data:
+                              count = data["rows"][0][0] if data["rows"] else 0
+                          elif isinstance(data, list) and data:
+                              count = data[0].get("cnt", data[0].get("", 0))
+                          else:
+                              count = data
+                          checks["checks"]["active_sessions"] = {
+                              "count": count, "max_allowed": 50,
+                              "status": "WARNING" if isinstance(count, int) and count > 40 else "OK"
+                          }
+                          break
+              else:
+                  checks["checks"]["active_sessions"] = {"status": "OK", "raw": str(result)[:300]}
+          except Exception as e:
+              checks["checks"]["active_sessions"] = {"status": "WARNING", "error": str(e)}
+
+      # --- Jobs batch ---
+      if checks["checks"].get("mcp_connection", {}).get("status") == "OK":
+          try:
+              result = mcp_query("""
+                  SELECT
+                      (SELECT COUNT(*) FROM msdb.dbo.sysjobactivity ja
+                       JOIN msdb.dbo.sysjobs j ON ja.job_id = j.job_id
+                       WHERE ja.start_execution_date IS NOT NULL
+                       AND ja.stop_execution_date IS NULL) AS running,
+                      (SELECT COUNT(*) FROM msdb.dbo.sysjobhistory h
+                       JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+                       WHERE h.run_status = 0
+                       AND DATEDIFF(HOUR,
+                           CAST(CAST(h.run_date AS VARCHAR) + ' ' +
+                                STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR), 6),
+                                3, 0, ':'), 6, 0, ':') AS DATETIME),
+                           GETDATE()) < 1) AS failed_last_hour
+              """)
+              if isinstance(result, dict) and "content" in result:
+                  for item in result["content"]:
+                      if item.get("type") == "text":
+                          data = json.loads(item["text"]) if isinstance(item["text"], str) else item["text"]
+                          if isinstance(data, dict) and "rows" in data and data["rows"]:
+                              running = data["rows"][0][0]
+                              failed = data["rows"][0][1]
+                          elif isinstance(data, list) and data:
+                              running = data[0].get("running", 0)
+                              failed = data[0].get("failed_last_hour", 0)
+                          else:
+                              running, failed = 0, 0
+                          checks["checks"]["batch_jobs"] = {
+                              "running": running, "failed_last_hour": failed,
+                              "status": "CRITICAL" if failed > 2 else ("WARNING" if failed > 0 else "OK")
+                          }
+                          break
+              else:
+                  checks["checks"]["batch_jobs"] = {"status": "OK", "raw": str(result)[:300]}
+          except Exception as e:
+              checks["checks"]["batch_jobs"] = {"status": "WARNING", "error": str(e)}
+
+      # --- Fraicheur des donnees (via MCP analyze_data_freshness) ---
+      if checks["checks"].get("mcp_connection", {}).get("status") == "OK":
+          try:
+              result = mcp_call("analyze_data_freshness", {"domain": "production"})
+              checks["checks"]["data_freshness"] = {"status": "OK", "detail": str(result)[:500]}
+          except Exception as e:
+              checks["checks"]["data_freshness"] = {"status": "WARNING", "error": str(e)}
+
+      # --- Derniere sauvegarde ---
+      if checks["checks"].get("mcp_connection", {}).get("status") == "OK":
+          try:
+              result = mcp_query("""
+                  SELECT TOP 1 backup_finish_date, type, backup_size / 1048576 AS size_mb
+                  FROM msdb.dbo.backupset
+                  WHERE database_name = 'Y2_MSC_MAROC'
+                  ORDER BY backup_finish_date DESC
+              """)
+              if isinstance(result, dict) and "content" in result:
+                  for item in result["content"]:
+                      if item.get("type") == "text":
+                          data = json.loads(item["text"]) if isinstance(item["text"], str) else item["text"]
+                          checks["checks"]["last_backup"] = {"status": "OK", "detail": data}
+                          break
+              else:
+                  checks["checks"]["last_backup"] = {"status": "OK", "raw": str(result)[:300]}
+          except Exception as e:
+              checks["checks"]["last_backup"] = {"status": "WARNING", "error": str(e)}
+
+      # --- Statut global ---
+      statuses = [c.get("status", "OK") for c in checks["checks"].values() if isinstance(c, dict)]
+      if any(s == "CRITICAL" for s in statuses):
+          checks["overall_status"] = "CRITICAL"
+      elif any(s == "WARNING" for s in statuses):
+          checks["overall_status"] = "DEGRADED"
 
       from kestra import Kestra
       Kestra.outputs({"cegid_health": json.dumps(checks)})
@@ -156,12 +199,10 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
+      containerImage: automit/python-erp:3.12
     env:
       X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
       X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
-    beforeCommands:
-      - pip install requests --quiet
     script: |
       import json
       import os
@@ -170,7 +211,7 @@ tasks:
 
       mcp_url = os.environ["X3_MCP_URL"]
       mcp_token = os.environ["X3_MCP_TOKEN"]
-      headers = {"X-MCP-TOKEN": mcp_token, "Content-Type": "application/json"}
+      headers = {"X-MCP-TOKEN": mcp_token, "Content-Type": "application/json", "Accept": "application/json"}
 
       checks = {
           "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -263,9 +304,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
-    beforeCommands:
-      - pip install requests msal --quiet
+      containerImage: automit/python-erp:3.12
     script: |
       import json
       from datetime import datetime
@@ -302,9 +341,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: python:3.12-slim
-    beforeCommands:
-      - pip install requests --quiet
+      containerImage: automit/python-erp:3.12
     script: |
       import json
       import os

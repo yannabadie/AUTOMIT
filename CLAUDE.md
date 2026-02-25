@@ -14,16 +14,16 @@ The platform monitors CEGID XRP Sprint, Sage X3, Active Directory, and Microsoft
 - **L2**: Agent proposes, human approves via Kestra Pause (e.g., disable compromised AD account)
 - **L3**: Agent recommends, human acts (e.g., "increase timeout for recurring failures")
 
-**Status**: PoC phase. Many ERP/AD connections are stubbed with TODOs.
+**Status**: PoC phase — Priority 1 (real ERP connections) completed. AD/M365 still stubbed.
 
-**Priorities**: (1) Real ERP connections replacing TODO stubs, (2) Onboarding/offboarding flow, (3) Microsoft Graph API integration, (4) Grafana dashboard.
+**Priorities**: (1) ~~Real ERP connections~~ DONE, (2) Onboarding/offboarding flow, (3) Microsoft Graph API integration, (4) Grafana dashboard.
 
 ## Target Infrastructure
 
 - **Sage X3 (production)**: Accès **exclusivement via MCP x3-oracle** (`MAS_D0Z9TB4:8001`), pas de connexion SQL directe. Token auth `X-MCP-TOKEN`.
-- **CEGID XRP Sprint (MSC Maroc)**: `002_srvcgdtest.adgroupe.com:1433` / DB: `Y2_MSC_MAROC` / User: `cegiduser` / ODBC Driver 17. API REST désactivée sur cette VM (`CEGID_API_ENABLED=false`). Knowledge base: DB `CEGID_KB`. Domaine Windows: `MIND`.
+- **CEGID XRP Sprint (MSC Maroc)**: Accès **exclusivement via MCP cegid-oracle** (`10.255.15.200:8000`). 20 outils MCP dont `query_database` (SQL read-only), `analyze_data_freshness`, `database_overview`. Token auth `X-MCP-TOKEN`. DB: `Y2_MSC_MAROC`. API REST désactivée (`CEGID_API_ENABLED=false`). Knowledge base: DB `CEGID_KB`. Domaine Windows: `MIND`. **Pas de connexion SQL directe** (port 1433 non accessible depuis Docker/réseau local).
 - **AD**: Windows Server 2022, DC: `dc01.motherson.local` / Compte service: `ADGROUPE\t1_yaa`
-- **M365**: E3 license, tenant: `motherson.onmicrosoft.com`
+- **M365**: E3 license, tenant: `adigroupe.onmicrosoft.com`
 - **Compliance**: EN9100 (aerospace), sites Serre-Castet + Tanger
 
 ### SSL/TLS Workarounds
@@ -89,7 +89,9 @@ The key constraint: **ZeroClaw never touches infrastructure directly**. It trigg
 | `kestra/flows/erp-job-restart.yml` | Kestra flow: L1 auto-restart of failed ERP jobs (webhook trigger) |
 | `kestra/flows/incident-escalation-l2.yml` | Kestra flow: L2 escalation with ticket creation and human approval pause |
 | `kestra/flows/ad-maintenance.yml` | Kestra flow: weekly AD audit with optional remediation |
-| `scripts/` | Monitoring & remediation scripts (Python/PowerShell), mounted read-only in ZeroClaw |
+| `scripts/erp/test_connectivity.py` | Connectivity test: CEGID MCP + Sage X3 MCP (8 tests) |
+| `scripts/docker/Dockerfile.python-erp` | Custom Docker image: python:3.12-slim + ODBC 17 + corporate CA |
+| `scripts/sync-codex-tokens.py` | Token sync from Codex CLI to ZeroClaw (ChaCha20-Poly1305) |
 | `claude_desktop_config.json` | MCP server config for Claude Desktop |
 | `.github/*.chatmode.md` | Four Claude Desktop modes: architect, code, ask, debug |
 | `memory-bank/` | Project knowledge base (mostly stubs to be filled) |
@@ -108,7 +110,7 @@ The key constraint: **ZeroClaw never touches infrastructure directly**. It trigg
 ## MCP Servers Available
 
 - **x3-oracle**: Sage X3 production — `http://MAS_D0Z9TB4:8001/mcp/` (Neo4j + vector search). Seul point d'accès X3, pas de SQL direct. Ref: `C:\Code\X3-Oracle`
-- **cegid-oracle**: CEGID XRP Sprint — `http://10.255.15.200:8000/mcp` (embeddings MiniLM, BM25, Swagger docs). Ref: `C:\Code\CEGID`
+- **cegid-oracle**: CEGID XRP Sprint — `http://10.255.15.200:8000/mcp` (20 tools: `query_database`, `analyze_data_freshness`, `database_overview`, `search_knowledge`, `explore_schema`, etc.). Seul point d'accès CEGID (port 1433 non accessible). Token: `X-MCP-TOKEN`. Ref: `C:\Code\CEGID`
 - **kestra-mcp**: Kestra flow/execution management from Claude Desktop
 
 ## Working on Kestra Flows
@@ -116,9 +118,11 @@ The key constraint: **ZeroClaw never touches infrastructure directly**. It trigg
 Flows are YAML files in `kestra/flows/`, auto-loaded via volume mount to `/app/flows` in Kestra. Each flow follows the pattern:
 1. **Trigger**: Cron schedule or webhook
 2. **Inputs**: Type-safe with defaults and allowed values
-3. **Tasks**: Docker-isolated Python/PowerShell scripts
+3. **Tasks**: Docker-isolated Python/PowerShell scripts using `automit/python-erp:3.12` (includes ODBC 17, corporate CA, pyodbc, requests, kestra SDK)
 4. **Outputs**: Structured JSON
 5. **Notifications**: Teams webhook on success/failure
+
+**Important**: All ERP access goes through MCP servers, never direct SQL. CEGID uses `query_database` tool for read queries and `sp_start_job` for job restarts. Sage X3 uses `batch_status`/`batch_restart` tools.
 
 Flow IDs use the namespace as prefix in the YAML `id` field (e.g., `erp-job-restart` under namespace `motherson.it.erp`).
 
