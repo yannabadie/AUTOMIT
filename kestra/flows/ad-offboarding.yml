@@ -395,7 +395,7 @@ tasks:
       result = {"m365_disabled": False, "mailbox_archived": False}
 
       if not all([tenant, client_id, client_secret]):
-          print("⚠️ Azure AD non configure — desactivation M365 manuelle requise")
+          print("⚠️ Entra ID non configure — desactivation M365 manuelle requise")
           result["status"] = "MANUAL_REQUIRED"
       else:
           try:
@@ -421,7 +421,7 @@ tasks:
                   print(f"✅ Compte M365 desactive: {upn}")
                   result["m365_disabled"] = True
               elif patch_resp.status_code == 404:
-                  print(f"⚠️ Utilisateur {upn} non trouve dans Azure AD")
+                  print(f"⚠️ Utilisateur {upn} non trouve dans Entra ID")
                   result["status"] = "NOT_FOUND"
               else:
                   print(f"❌ Erreur desactivation M365: {patch_resp.status_code} {patch_resp.text[:300]}")

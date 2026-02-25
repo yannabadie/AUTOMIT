@@ -327,7 +327,7 @@ tasks:
       client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
 
       if not all([tenant, client_id, client_secret]):
-          print("⚠️ Azure AD credentials non configurees — mode degrade")
+          print("⚠️ Entra ID credentials non configurees — mode degrade")
           checks["checks"]["auth"] = {"status": "WARNING", "detail": "AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET non configures"}
           checks["overall_status"] = "DEGRADED"
       else:

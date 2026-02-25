@@ -62,7 +62,7 @@ tasks:
       client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
 
       if not all([tenant, client_id, client_secret]):
-          print("❌ Azure AD credentials non configurees")
+          print("❌ Entra ID credentials non configurees")
           print("   Remplir AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET dans .env")
           from kestra import Kestra
           Kestra.outputs({"authenticated": False, "error": "Credentials manquantes"})
@@ -350,7 +350,7 @@ tasks:
           elif resp.status_code == 403:
               report["checks"]["risky_users"] = {
                   "status": "WARNING",
-                  "detail": "Permission IdentityRiskyUser.Read.All requise (Azure AD P2)"
+                  "detail": "Permission IdentityRiskyUser.Read.All requise (Entra ID P2)"
               }
           else:
               report["checks"]["risky_users"] = {"status": "OK", "detail": "Non disponible"}
@@ -665,7 +665,7 @@ errors:
           "activityTitle": "❌ Echec audit M365",
           "facts": [
             {"name": "Execution", "value": "{{ execution.id }}"},
-            {"name": "Action", "value": "Verifier les credentials Azure AD dans .env"}
+            {"name": "Action", "value": "Verifier les credentials Entra ID dans .env"}
           ]
         }]
       }

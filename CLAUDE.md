@@ -14,7 +14,7 @@ The platform monitors CEGID XRP Sprint, Sage X3, Active Directory, and Microsoft
 - **L2**: Agent proposes, human approves via Kestra Pause (e.g., disable compromised AD account)
 - **L3**: Agent recommends, human acts (e.g., "increase timeout for recurring failures")
 
-**Status**: PoC complet — les 4 priorites sont implementees. AD PowerShell et Azure credentials restent a configurer en prod.
+**Status**: PoC complet — les 4 priorites sont implementees. AD PowerShell et Entra ID credentials restent a configurer en prod.
 
 **Priorities**: (1) ~~Real ERP connections~~ DONE, (2) ~~Onboarding/offboarding flow~~ DONE, (3) ~~Microsoft Graph API integration~~ DONE, (4) ~~Grafana dashboard~~ DONE.
 

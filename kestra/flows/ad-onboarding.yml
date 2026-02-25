@@ -415,10 +415,10 @@ tasks:
           result = {"m365_provisioned": False, "license": license_type}
 
           if not all([tenant, client_id, client_secret]):
-              print("⚠️ Azure AD App Registration non configuree (AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET vides)")
+              print("⚠️ Entra ID App Registration non configuree (AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET vides)")
               print("   M365 provisioning sera fait manuellement")
               result["status"] = "MANUAL_REQUIRED"
-              result["reason"] = "Azure AD credentials not configured"
+              result["reason"] = "Entra ID credentials not configured"
           else:
               try:
                   # Obtenir un token Graph API
@@ -437,7 +437,7 @@ tasks:
                       "Content-Type": "application/json"
                   }
 
-                  # Verifier si l'utilisateur existe deja dans Azure AD
+                  # Verifier si l'utilisateur existe deja dans Entra ID
                   check_url = f"https://graph.microsoft.com/v1.0/users/{plan['upn']}"
                   check_resp = requests.get(check_url, headers=headers, timeout=15)
 
@@ -446,10 +446,10 @@ tasks:
                       result["m365_provisioned"] = True
                       result["status"] = "ALREADY_EXISTS"
                   elif check_resp.status_code == 404:
-                      # L'utilisateur sera synchronise via Azure AD Connect si AD on-prem
-                      # Sinon, creer directement dans Azure AD
-                      print(f"📝 Utilisateur {plan['upn']} non trouve dans Azure AD")
-                      print("   Si Azure AD Connect est actif, l'utilisateur sera synchronise automatiquement")
+                      # L'utilisateur sera synchronise via Entra Connect si AD on-prem
+                      # Sinon, creer directement dans Entra ID
+                      print(f"📝 Utilisateur {plan['upn']} non trouve dans Entra ID")
+                      print("   Si Entra Connect est actif, l'utilisateur sera synchronise automatiquement")
                       print("   Sinon, creation manuelle requise dans le portail M365")
                       result["status"] = "PENDING_SYNC"
                       result["m365_provisioned"] = True
