@@ -305,30 +305,197 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       containerImage: automit/python-erp:3.12
+    env:
+      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
     script: |
       import json
+      import os
+      import requests
       from datetime import datetime
 
-      # TODO: Implémenter via Microsoft Graph API
-      # Nécessite: App Registration Azure AD + Client Secret
       checks = {
           "timestamp": datetime.utcnow().isoformat() + "Z",
           "service": "microsoft_365",
-          "checks": {
-              "exchange_online": {"status": "OK"},
-              "sharepoint": {"status": "OK"},
-              "teams": {"status": "OK"},
-              "intune": {"status": "OK"},
-              "license_usage": {
-                  "total": 150,
-                  "assigned": 132,
-                  "available": 18,
-                  "status": "OK"
-              },
-              "conditional_access_alerts": 0
-          },
+          "checks": {},
           "overall_status": "HEALTHY"
       }
+
+      tenant = os.environ.get("AZURE_TENANT_ID", "")
+      client_id = os.environ.get("AZURE_CLIENT_ID", "")
+      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+
+      if not all([tenant, client_id, client_secret]):
+          print("⚠️ Azure AD credentials non configurees — mode degrade")
+          checks["checks"]["auth"] = {"status": "WARNING", "detail": "AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET non configures"}
+          checks["overall_status"] = "DEGRADED"
+      else:
+          # --- Obtenir un token Graph API ---
+          try:
+              token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+              token_resp = requests.post(token_url, data={
+                  "client_id": client_id,
+                  "client_secret": client_secret,
+                  "scope": "https://graph.microsoft.com/.default",
+                  "grant_type": "client_credentials"
+              }, timeout=30)
+              token_resp.raise_for_status()
+              access_token = token_resp.json()["access_token"]
+              headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+              checks["checks"]["auth"] = {"status": "OK", "detail": "Token Graph API obtenu"}
+          except Exception as e:
+              checks["checks"]["auth"] = {"status": "CRITICAL", "error": str(e)[:300]}
+              checks["overall_status"] = "CRITICAL"
+              access_token = None
+
+          if access_token:
+              # --- Service Health (Exchange, SharePoint, Teams) ---
+              try:
+                  resp = requests.get(
+                      "https://graph.microsoft.com/v1.0/admin/serviceAnnouncement/healthOverviews",
+                      headers=headers, timeout=15
+                  )
+                  if resp.status_code == 200:
+                      services = resp.json().get("value", [])
+                      service_health = {}
+                      for svc in services:
+                          svc_id = svc.get("id", svc.get("service", "unknown"))
+                          svc_status = svc.get("status", "unknown")
+                          # Mapping Graph status to our status
+                          if svc_status in ("serviceOperational", "serviceDegradation"):
+                              status = "OK" if svc_status == "serviceOperational" else "WARNING"
+                          elif svc_status in ("serviceInterruption", "extendedRecovery"):
+                              status = "CRITICAL"
+                          else:
+                              status = "OK"
+                          service_health[svc_id] = {"status": status, "graph_status": svc_status}
+
+                      # Extraire les services cles
+                      key_services = {
+                          "exchange_online": "Exchange Online",
+                          "sharepoint_online": "SharePoint Online",
+                          "microsoft_teams": "Microsoft Teams",
+                          "microsoft_intune": "Microsoft Intune"
+                      }
+                      for key, name in key_services.items():
+                          match = next((v for k, v in service_health.items() if name.lower() in k.lower()), None)
+                          checks["checks"][key] = match or {"status": "OK", "detail": "Non trouve dans healthOverviews"}
+
+                      checks["checks"]["service_health_total"] = len(services)
+                  elif resp.status_code == 403:
+                      checks["checks"]["service_health"] = {
+                          "status": "WARNING",
+                          "detail": "Permission ServiceHealth.Read.All requise"
+                      }
+                  else:
+                      checks["checks"]["service_health"] = {
+                          "status": "WARNING",
+                          "http_status": resp.status_code,
+                          "detail": resp.text[:300]
+                      }
+              except Exception as e:
+                  checks["checks"]["service_health"] = {"status": "WARNING", "error": str(e)[:200]}
+
+              # --- Licences M365 ---
+              try:
+                  resp = requests.get(
+                      "https://graph.microsoft.com/v1.0/subscribedSkus",
+                      headers=headers, timeout=15
+                  )
+                  if resp.status_code == 200:
+                      skus = resp.json().get("value", [])
+                      total_licenses = 0
+                      assigned_licenses = 0
+                      license_details = []
+                      for sku in skus:
+                          if sku.get("capabilityStatus") == "Enabled":
+                              total = sku.get("prepaidUnits", {}).get("enabled", 0)
+                              consumed = sku.get("consumedUnits", 0)
+                              total_licenses += total
+                              assigned_licenses += consumed
+                              license_details.append({
+                                  "sku": sku.get("skuPartNumber", "?"),
+                                  "total": total,
+                                  "consumed": consumed,
+                                  "available": total - consumed
+                              })
+                      available = total_licenses - assigned_licenses
+                      usage_pct = round(assigned_licenses / total_licenses * 100, 1) if total_licenses > 0 else 0
+                      checks["checks"]["license_usage"] = {
+                          "total": total_licenses,
+                          "assigned": assigned_licenses,
+                          "available": available,
+                          "usage_percent": usage_pct,
+                          "status": "CRITICAL" if usage_pct > 95 else ("WARNING" if usage_pct > 85 else "OK"),
+                          "details": license_details[:10]
+                      }
+                  elif resp.status_code == 403:
+                      checks["checks"]["license_usage"] = {
+                          "status": "WARNING",
+                          "detail": "Permission Organization.Read.All requise"
+                      }
+                  else:
+                      checks["checks"]["license_usage"] = {
+                          "status": "WARNING",
+                          "http_status": resp.status_code
+                      }
+              except Exception as e:
+                  checks["checks"]["license_usage"] = {"status": "WARNING", "error": str(e)[:200]}
+
+              # --- Alertes securite recentes ---
+              try:
+                  resp = requests.get(
+                      "https://graph.microsoft.com/v1.0/security/alerts_v2?$top=10&$orderby=createdDateTime desc",
+                      headers=headers, timeout=15
+                  )
+                  if resp.status_code == 200:
+                      alerts = resp.json().get("value", [])
+                      high_alerts = [a for a in alerts if a.get("severity") in ("high", "critical")]
+                      checks["checks"]["security_alerts"] = {
+                          "total_recent": len(alerts),
+                          "high_critical": len(high_alerts),
+                          "status": "CRITICAL" if len(high_alerts) > 0 else "OK"
+                      }
+                  elif resp.status_code == 403:
+                      checks["checks"]["security_alerts"] = {
+                          "status": "WARNING",
+                          "detail": "Permission SecurityEvents.Read.All requise"
+                      }
+                  else:
+                      checks["checks"]["security_alerts"] = {"status": "OK", "detail": "API non accessible"}
+              except Exception as e:
+                  checks["checks"]["security_alerts"] = {"status": "WARNING", "error": str(e)[:200]}
+
+              # --- Utilisateurs risques (Identity Protection) ---
+              try:
+                  resp = requests.get(
+                      "https://graph.microsoft.com/v1.0/identityProtection/riskyUsers?$filter=riskLevel eq 'high'&$top=5",
+                      headers=headers, timeout=15
+                  )
+                  if resp.status_code == 200:
+                      risky = resp.json().get("value", [])
+                      checks["checks"]["risky_users"] = {
+                          "high_risk_count": len(risky),
+                          "status": "CRITICAL" if len(risky) > 0 else "OK",
+                          "users": [u.get("userPrincipalName", "?") for u in risky[:5]]
+                      }
+                  elif resp.status_code == 403:
+                      checks["checks"]["risky_users"] = {
+                          "status": "WARNING",
+                          "detail": "Permission IdentityRiskyUser.Read.All requise (P2 requis)"
+                      }
+                  else:
+                      checks["checks"]["risky_users"] = {"status": "OK", "detail": "Non disponible"}
+              except Exception as e:
+                  checks["checks"]["risky_users"] = {"status": "WARNING", "error": str(e)[:200]}
+
+      # --- Statut global ---
+      statuses = [c.get("status", "OK") for c in checks["checks"].values() if isinstance(c, dict)]
+      if any(s == "CRITICAL" for s in statuses):
+          checks["overall_status"] = "CRITICAL"
+      elif any(s == "WARNING" for s in statuses):
+          checks["overall_status"] = "DEGRADED"
 
       from kestra import Kestra
       Kestra.outputs({"m365_health": json.dumps(checks)})

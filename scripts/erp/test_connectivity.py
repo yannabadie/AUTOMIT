@@ -156,6 +156,81 @@ def test_x3_health():
 
 
 # =============================================================================
+# Microsoft 365 — Graph API
+# =============================================================================
+def _graph_token():
+    """Get a Graph API access token via client credentials."""
+    import requests
+    tenant = os.environ["AZURE_TENANT_ID"]
+    resp = requests.post(
+        f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+        data={
+            "client_id": os.environ["AZURE_CLIENT_ID"],
+            "client_secret": os.environ["AZURE_CLIENT_SECRET"],
+            "scope": "https://graph.microsoft.com/.default",
+            "grant_type": "client_credentials"
+        }, timeout=30
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def test_graph_auth():
+    token = _graph_token()
+    return {"authenticated": True, "token_length": len(token)}
+
+
+def test_graph_service_health():
+    import requests
+    token = _graph_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    resp = requests.get(
+        "https://graph.microsoft.com/v1.0/admin/serviceAnnouncement/healthOverviews",
+        headers=headers, timeout=15
+    )
+    if resp.status_code == 200:
+        services = resp.json().get("value", [])
+        return {"services_count": len(services), "services": [s.get("id", "?") for s in services[:10]]}
+    elif resp.status_code == 403:
+        return {"status": "PERMISSION_NEEDED", "detail": "ServiceHealth.Read.All"}
+    return {"http_status": resp.status_code, "body": resp.text[:300]}
+
+
+def test_graph_licenses():
+    import requests
+    token = _graph_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    resp = requests.get(
+        "https://graph.microsoft.com/v1.0/subscribedSkus",
+        headers=headers, timeout=15
+    )
+    if resp.status_code == 200:
+        skus = resp.json().get("value", [])
+        total = sum(s.get("prepaidUnits", {}).get("enabled", 0) for s in skus if s.get("capabilityStatus") == "Enabled")
+        consumed = sum(s.get("consumedUnits", 0) for s in skus if s.get("capabilityStatus") == "Enabled")
+        return {"skus": len(skus), "total_licenses": total, "consumed": consumed, "available": total - consumed}
+    elif resp.status_code == 403:
+        return {"status": "PERMISSION_NEEDED", "detail": "Organization.Read.All"}
+    return {"http_status": resp.status_code}
+
+
+def test_graph_users():
+    import requests
+    token = _graph_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    resp = requests.get(
+        "https://graph.microsoft.com/v1.0/users?$top=5&$select=displayName,userPrincipalName",
+        headers=headers, timeout=15
+    )
+    if resp.status_code == 200:
+        users = resp.json().get("value", [])
+        return {"users_returned": len(users), "sample": [u.get("userPrincipalName", "?") for u in users]}
+    elif resp.status_code == 403:
+        return {"status": "PERMISSION_NEEDED", "detail": "User.Read.All"}
+    return {"http_status": resp.status_code}
+
+
+# =============================================================================
 # Main
 # =============================================================================
 if __name__ == "__main__":
@@ -187,6 +262,17 @@ if __name__ == "__main__":
         test("X3 — Health Check", test_x3_health)
     else:
         print("\n[Sage X3] SKIP — Variables manquantes:", [v for v in x3_vars if not os.environ.get(v)])
+
+    # M365 tests (Graph API)
+    m365_vars = ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"]
+    if all(os.environ.get(v) for v in m365_vars):
+        print("\n[Microsoft 365 — Graph API]")
+        test("M365 — Auth Graph API", test_graph_auth)
+        test("M365 — Service Health", test_graph_service_health)
+        test("M365 — Licences", test_graph_licenses)
+        test("M365 — Utilisateurs", test_graph_users)
+    else:
+        print("\n[M365] SKIP — Variables manquantes:", [v for v in m365_vars if not os.environ.get(v)])
 
     # Summary
     print(f"\n{'=' * 60}")

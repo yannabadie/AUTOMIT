@@ -1,0 +1,682 @@
+# =============================================================================
+# FLOW: Microsoft 365 Security & Compliance Audit
+# Triggered by: Schedule (weekly) + ZeroClaw webhook
+# Action: Audit licences, MFA, sign-ins suspects, comptes inactifs
+# Autonomy Level: L1 (rapport) / L2 (actions correctives)
+# =============================================================================
+id: m365-audit
+namespace: motherson.it.ad
+
+description: |
+  Audit hebdomadaire Microsoft 365 via Graph API.
+  Verifie: licences, MFA, sign-ins suspects, comptes inactifs,
+  applications OAuth, acces conditionnel.
+  L1 = rapport automatique. L2 = actions correctives sur validation.
+
+labels:
+  team: it-ops
+  criticality: high
+  autonomy: L1-L2
+  compliance: EN9100
+
+inputs:
+  - id: mode
+    type: STRING
+    defaults: "audit_only"
+    allowedValues: [audit_only, audit_and_remediate]
+    description: "audit_only = rapport seul | audit_and_remediate = rapport + actions (L2)"
+
+  - id: inactive_days_threshold
+    type: INT
+    defaults: 90
+    description: "Seuil d'inactivite en jours pour flaguer un compte M365"
+
+  - id: correlation_id
+    type: STRING
+    required: false
+
+variables:
+  teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+
+tasks:
+  # -------------------------------------------------------------------------
+  # 1. Obtenir le token Graph API
+  # -------------------------------------------------------------------------
+  - id: get_graph_token
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+    script: |
+      import json
+      import os
+      import sys
+      import requests
+
+      tenant = os.environ.get("AZURE_TENANT_ID", "")
+      client_id = os.environ.get("AZURE_CLIENT_ID", "")
+      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+
+      if not all([tenant, client_id, client_secret]):
+          print("❌ Azure AD credentials non configurees")
+          print("   Remplir AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET dans .env")
+          from kestra import Kestra
+          Kestra.outputs({"authenticated": False, "error": "Credentials manquantes"})
+          sys.exit(1)
+
+      try:
+          token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+          resp = requests.post(token_url, data={
+              "client_id": client_id,
+              "client_secret": client_secret,
+              "scope": "https://graph.microsoft.com/.default",
+              "grant_type": "client_credentials"
+          }, timeout=30)
+          resp.raise_for_status()
+          token = resp.json()["access_token"]
+          expires_in = resp.json().get("expires_in", 3600)
+          print(f"✅ Token Graph API obtenu (expire dans {expires_in}s)")
+
+          from kestra import Kestra
+          Kestra.outputs({"authenticated": True, "token": token})
+      except Exception as e:
+          print(f"❌ Erreur auth Graph API: {e}")
+          from kestra import Kestra
+          Kestra.outputs({"authenticated": False, "error": str(e)})
+          sys.exit(1)
+
+  # -------------------------------------------------------------------------
+  # 2. Audit licences M365
+  # -------------------------------------------------------------------------
+  - id: audit_licenses
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      import requests
+      from datetime import datetime
+
+      token = "{{ outputs.get_graph_token.vars.token }}"
+      headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+      report = {
+          "timestamp": datetime.utcnow().isoformat() + "Z",
+          "audit_type": "licenses",
+          "skus": [],
+          "summary": {}
+      }
+
+      try:
+          resp = requests.get(
+              "https://graph.microsoft.com/v1.0/subscribedSkus",
+              headers=headers, timeout=15
+          )
+          resp.raise_for_status()
+          skus = resp.json().get("value", [])
+
+          total_all = 0
+          consumed_all = 0
+          warnings = []
+
+          for sku in skus:
+              if sku.get("capabilityStatus") != "Enabled":
+                  continue
+              name = sku.get("skuPartNumber", "unknown")
+              total = sku.get("prepaidUnits", {}).get("enabled", 0)
+              consumed = sku.get("consumedUnits", 0)
+              available = total - consumed
+              usage_pct = round(consumed / total * 100, 1) if total > 0 else 0
+
+              total_all += total
+              consumed_all += consumed
+
+              entry = {
+                  "sku": name,
+                  "sku_id": sku.get("skuId", ""),
+                  "total": total,
+                  "consumed": consumed,
+                  "available": available,
+                  "usage_percent": usage_pct
+              }
+              report["skus"].append(entry)
+
+              if usage_pct > 90:
+                  warnings.append(f"{name}: {usage_pct}% utilise ({available} restantes)")
+
+          report["summary"] = {
+              "total_skus": len(report["skus"]),
+              "total_licenses": total_all,
+              "total_consumed": consumed_all,
+              "total_available": total_all - consumed_all,
+              "global_usage_pct": round(consumed_all / total_all * 100, 1) if total_all > 0 else 0,
+              "warnings": warnings,
+              "status": "CRITICAL" if any(s.get("usage_percent", 0) > 95 for s in report["skus"]) else
+                        ("WARNING" if warnings else "OK")
+          }
+
+          print(f"Licences: {consumed_all}/{total_all} utilisees ({report['summary']['global_usage_pct']}%)")
+          if warnings:
+              for w in warnings:
+                  print(f"  ⚠️ {w}")
+
+      except Exception as e:
+          report["error"] = str(e)
+          report["summary"]["status"] = "ERROR"
+          print(f"❌ Erreur audit licences: {e}")
+
+      from kestra import Kestra
+      Kestra.outputs({"licenses_report": json.dumps(report)})
+
+  # -------------------------------------------------------------------------
+  # 3. Audit comptes inactifs M365
+  # -------------------------------------------------------------------------
+  - id: audit_inactive_users
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      import requests
+      from datetime import datetime, timedelta, timezone
+
+      token = "{{ outputs.get_graph_token.vars.token }}"
+      threshold_days = {{ inputs.inactive_days_threshold }}
+      headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "ConsistencyLevel": "eventual"}
+
+      report = {
+          "timestamp": datetime.utcnow().isoformat() + "Z",
+          "audit_type": "inactive_users",
+          "threshold_days": threshold_days,
+          "inactive_users": [],
+          "summary": {}
+      }
+
+      cutoff = (datetime.now(timezone.utc) - timedelta(days=threshold_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+      try:
+          # Obtenir les utilisateurs avec last sign-in
+          # Necessite: AuditLog.Read.All + Directory.Read.All
+          resp = requests.get(
+              "https://graph.microsoft.com/v1.0/users"
+              "?$select=displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses,department,jobTitle"
+              "&$filter=accountEnabled eq true"
+              "&$top=999"
+              "&$count=true",
+              headers=headers, timeout=30
+          )
+
+          if resp.status_code == 200:
+              users = resp.json().get("value", [])
+              total_users = len(users)
+              inactive = []
+              no_signin = []
+
+              for user in users:
+                  upn = user.get("userPrincipalName", "")
+                  # Skip service accounts and external
+                  if upn.startswith("svc_") or "#EXT#" in upn:
+                      continue
+
+                  sign_in = user.get("signInActivity", {})
+                  last_signin = sign_in.get("lastSignInDateTime") or sign_in.get("lastNonInteractiveSignInDateTime")
+
+                  if last_signin:
+                      if last_signin < cutoff:
+                          inactive.append({
+                              "upn": upn,
+                              "display_name": user.get("displayName", ""),
+                              "department": user.get("department", ""),
+                              "job_title": user.get("jobTitle", ""),
+                              "last_signin": last_signin,
+                              "has_licenses": len(user.get("assignedLicenses", [])) > 0
+                          })
+                  else:
+                      no_signin.append({
+                          "upn": upn,
+                          "display_name": user.get("displayName", ""),
+                          "department": user.get("department", ""),
+                          "has_licenses": len(user.get("assignedLicenses", [])) > 0
+                      })
+
+              report["inactive_users"] = inactive[:50]
+              report["no_signin_users"] = no_signin[:20]
+              report["summary"] = {
+                  "total_enabled_users": total_users,
+                  "inactive_count": len(inactive),
+                  "no_signin_count": len(no_signin),
+                  "inactive_with_licenses": sum(1 for u in inactive if u.get("has_licenses")),
+                  "potential_license_savings": sum(1 for u in inactive if u.get("has_licenses")),
+                  "status": "WARNING" if len(inactive) > 5 else "OK"
+              }
+
+              print(f"Utilisateurs actifs: {total_users}")
+              print(f"Inactifs >{threshold_days}j: {len(inactive)} ({sum(1 for u in inactive if u.get('has_licenses'))} avec licences)")
+              print(f"Jamais connectes: {len(no_signin)}")
+          elif resp.status_code == 403:
+              report["summary"] = {
+                  "status": "WARNING",
+                  "detail": "Permissions requises: AuditLog.Read.All + Directory.Read.All"
+              }
+              print("⚠️ Permission insuffisante pour signInActivity")
+          else:
+              report["summary"] = {"status": "ERROR", "http_status": resp.status_code, "detail": resp.text[:300]}
+              print(f"❌ Erreur: HTTP {resp.status_code}")
+
+      except Exception as e:
+          report["summary"] = {"status": "ERROR", "error": str(e)}
+          print(f"❌ Erreur audit inactifs: {e}")
+
+      from kestra import Kestra
+      Kestra.outputs({"inactive_report": json.dumps(report)})
+
+  # -------------------------------------------------------------------------
+  # 4. Audit securite — MFA, sign-ins risques
+  # -------------------------------------------------------------------------
+  - id: audit_security
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      import requests
+      from datetime import datetime, timedelta, timezone
+
+      token = "{{ outputs.get_graph_token.vars.token }}"
+      headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+      report = {
+          "timestamp": datetime.utcnow().isoformat() + "Z",
+          "audit_type": "security",
+          "checks": {}
+      }
+
+      # --- MFA Registration (necessite Reports.Read.All) ---
+      try:
+          resp = requests.get(
+              "https://graph.microsoft.com/v1.0/reports/authenticationMethods/userRegistrationDetails"
+              "?$filter=isMfaRegistered eq false and userType eq 'member'"
+              "&$top=100",
+              headers=headers, timeout=15
+          )
+          if resp.status_code == 200:
+              no_mfa = resp.json().get("value", [])
+              report["checks"]["mfa"] = {
+                  "users_without_mfa": len(no_mfa),
+                  "users": [u.get("userPrincipalName", "?") for u in no_mfa[:15]],
+                  "status": "CRITICAL" if len(no_mfa) > 10 else ("WARNING" if len(no_mfa) > 0 else "OK")
+              }
+              print(f"MFA: {len(no_mfa)} utilisateurs sans MFA")
+          elif resp.status_code == 403:
+              report["checks"]["mfa"] = {
+                  "status": "WARNING",
+                  "detail": "Permission Reports.Read.All ou UserAuthenticationMethod.Read.All requise"
+              }
+          else:
+              report["checks"]["mfa"] = {"status": "WARNING", "http_status": resp.status_code}
+      except Exception as e:
+          report["checks"]["mfa"] = {"status": "WARNING", "error": str(e)[:200]}
+
+      # --- Utilisateurs risques (Identity Protection P2) ---
+      try:
+          resp = requests.get(
+              "https://graph.microsoft.com/v1.0/identityProtection/riskyUsers"
+              "?$filter=riskState eq 'atRisk'"
+              "&$top=20",
+              headers=headers, timeout=15
+          )
+          if resp.status_code == 200:
+              risky = resp.json().get("value", [])
+              report["checks"]["risky_users"] = {
+                  "count": len(risky),
+                  "high_risk": [u for u in risky if u.get("riskLevel") == "high"],
+                  "medium_risk": [u for u in risky if u.get("riskLevel") == "medium"],
+                  "users": [{
+                      "upn": u.get("userPrincipalName", "?"),
+                      "risk_level": u.get("riskLevel", "?"),
+                      "risk_detail": u.get("riskDetail", "?")
+                  } for u in risky[:10]],
+                  "status": "CRITICAL" if any(u.get("riskLevel") == "high" for u in risky) else
+                            ("WARNING" if risky else "OK")
+              }
+              print(f"Utilisateurs a risque: {len(risky)} ({len([u for u in risky if u.get('riskLevel') == 'high'])} high)")
+          elif resp.status_code == 403:
+              report["checks"]["risky_users"] = {
+                  "status": "WARNING",
+                  "detail": "Permission IdentityRiskyUser.Read.All requise (Azure AD P2)"
+              }
+          else:
+              report["checks"]["risky_users"] = {"status": "OK", "detail": "Non disponible"}
+      except Exception as e:
+          report["checks"]["risky_users"] = {"status": "WARNING", "error": str(e)[:200]}
+
+      # --- Sign-ins suspects (7 derniers jours) ---
+      try:
+          seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+          resp = requests.get(
+              f"https://graph.microsoft.com/v1.0/auditLogs/signIns"
+              f"?$filter=createdDateTime ge {seven_days_ago} and riskLevelDuringSignIn ne 'none'"
+              f"&$top=50&$orderby=createdDateTime desc",
+              headers=headers, timeout=15
+          )
+          if resp.status_code == 200:
+              signins = resp.json().get("value", [])
+              report["checks"]["risky_signins"] = {
+                  "count_7d": len(signins),
+                  "by_risk_level": {},
+                  "locations": [],
+                  "status": "CRITICAL" if len(signins) > 20 else ("WARNING" if signins else "OK")
+              }
+              for s in signins:
+                  level = s.get("riskLevelDuringSignIn", "unknown")
+                  report["checks"]["risky_signins"]["by_risk_level"][level] = \
+                      report["checks"]["risky_signins"]["by_risk_level"].get(level, 0) + 1
+                  loc = s.get("location", {})
+                  if loc.get("countryOrRegion"):
+                      report["checks"]["risky_signins"]["locations"].append(loc.get("countryOrRegion"))
+              # Deduplicate locations
+              report["checks"]["risky_signins"]["locations"] = list(set(report["checks"]["risky_signins"]["locations"]))
+              print(f"Sign-ins risques (7j): {len(signins)}")
+          elif resp.status_code == 403:
+              report["checks"]["risky_signins"] = {
+                  "status": "WARNING",
+                  "detail": "Permission AuditLog.Read.All requise"
+              }
+          else:
+              report["checks"]["risky_signins"] = {"status": "OK", "detail": "Non disponible"}
+      except Exception as e:
+          report["checks"]["risky_signins"] = {"status": "WARNING", "error": str(e)[:200]}
+
+      # --- Applications OAuth tierces ---
+      try:
+          resp = requests.get(
+              "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?$top=100",
+              headers=headers, timeout=15
+          )
+          if resp.status_code == 200:
+              grants = resp.json().get("value", [])
+              # Compter les grants avec consentement admin vs utilisateur
+              admin_grants = [g for g in grants if g.get("consentType") == "AllPrincipals"]
+              user_grants = [g for g in grants if g.get("consentType") == "Principal"]
+              report["checks"]["oauth_apps"] = {
+                  "total_grants": len(grants),
+                  "admin_consent": len(admin_grants),
+                  "user_consent": len(user_grants),
+                  "status": "WARNING" if len(user_grants) > 20 else "OK"
+              }
+              print(f"OAuth grants: {len(grants)} ({len(admin_grants)} admin, {len(user_grants)} utilisateur)")
+          elif resp.status_code == 403:
+              report["checks"]["oauth_apps"] = {
+                  "status": "WARNING",
+                  "detail": "Permission Directory.Read.All requise"
+              }
+          else:
+              report["checks"]["oauth_apps"] = {"status": "OK"}
+      except Exception as e:
+          report["checks"]["oauth_apps"] = {"status": "WARNING", "error": str(e)[:200]}
+
+      # Statut global securite
+      statuses = [c.get("status", "OK") for c in report["checks"].values() if isinstance(c, dict)]
+      if any(s == "CRITICAL" for s in statuses):
+          report["overall_status"] = "CRITICAL"
+      elif any(s == "WARNING" for s in statuses):
+          report["overall_status"] = "DEGRADED"
+      else:
+          report["overall_status"] = "HEALTHY"
+
+      from kestra import Kestra
+      Kestra.outputs({"security_report": json.dumps(report)})
+      print(json.dumps(report, indent=2))
+
+  # -------------------------------------------------------------------------
+  # 5. Generer le rapport consolide
+  # -------------------------------------------------------------------------
+  - id: generate_report
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      from datetime import datetime
+
+      licenses = json.loads('''{{ outputs.audit_licenses.vars.licenses_report }}''')
+      inactive = json.loads('''{{ outputs.audit_inactive_users.vars.inactive_report }}''')
+      security = json.loads('''{{ outputs.audit_security.vars.security_report }}''')
+
+      report = {
+          "title": "Rapport Audit M365 — Motherson Aerospace",
+          "date": datetime.utcnow().isoformat() + "Z",
+          "mode": "{{ inputs.mode }}",
+          "execution_id": "{{ execution.id }}",
+          "sections": {
+              "licenses": licenses.get("summary", {}),
+              "inactive_users": inactive.get("summary", {}),
+              "security": {
+                  "mfa": security.get("checks", {}).get("mfa", {}),
+                  "risky_users": security.get("checks", {}).get("risky_users", {}),
+                  "risky_signins": security.get("checks", {}).get("risky_signins", {}),
+                  "oauth_apps": security.get("checks", {}).get("oauth_apps", {})
+              }
+          },
+          "recommendations": []
+      }
+
+      # Generer les recommandations
+      lic = licenses.get("summary", {})
+      if lic.get("status") in ("WARNING", "CRITICAL"):
+          for w in lic.get("warnings", []):
+              report["recommendations"].append(f"📋 Licences: {w}")
+
+      inact = inactive.get("summary", {})
+      if inact.get("inactive_count", 0) > 0:
+          savings = inact.get("potential_license_savings", 0)
+          report["recommendations"].append(
+              f"👤 {inact['inactive_count']} comptes inactifs detectes"
+              f" ({savings} avec licences — economie potentielle)"
+          )
+
+      sec_mfa = security.get("checks", {}).get("mfa", {})
+      if sec_mfa.get("users_without_mfa", 0) > 0:
+          report["recommendations"].append(
+              f"🔐 {sec_mfa['users_without_mfa']} utilisateurs sans MFA — conformite EN9100 requiert MFA"
+          )
+
+      sec_risky = security.get("checks", {}).get("risky_users", {})
+      if sec_risky.get("count", 0) > 0:
+          report["recommendations"].append(
+              f"⚠️ {sec_risky['count']} utilisateurs a risque — investigation requise"
+          )
+
+      sec_signins = security.get("checks", {}).get("risky_signins", {})
+      if sec_signins.get("count_7d", 0) > 0:
+          locs = sec_signins.get("locations", [])
+          report["recommendations"].append(
+              f"🌍 {sec_signins['count_7d']} sign-ins suspects (7j) depuis: {', '.join(locs[:5])}"
+          )
+
+      if not report["recommendations"]:
+          report["recommendations"].append("✅ Aucune anomalie detectee")
+
+      # Statut global
+      all_statuses = [
+          lic.get("status", "OK"),
+          inact.get("status", "OK"),
+          security.get("overall_status", "HEALTHY").replace("HEALTHY", "OK").replace("DEGRADED", "WARNING")
+      ]
+      if any(s == "CRITICAL" for s in all_statuses):
+          report["overall_status"] = "CRITICAL"
+      elif any(s in ("WARNING", "DEGRADED") for s in all_statuses):
+          report["overall_status"] = "WARNING"
+      else:
+          report["overall_status"] = "OK"
+
+      from kestra import Kestra
+      Kestra.outputs({
+          "overall_status": report["overall_status"],
+          "recommendations_count": len(report["recommendations"]),
+          "report": json.dumps(report)
+      })
+
+      print(f"\n{'='*60}")
+      print(f"RAPPORT AUDIT M365 — {report['date']}")
+      print(f"{'='*60}")
+      for r in report["recommendations"]:
+          print(f"  {r}")
+      print(f"\nStatut global: {report['overall_status']}")
+
+  # -------------------------------------------------------------------------
+  # 6. Si mode remediate: pause pour validation
+  # -------------------------------------------------------------------------
+  - id: check_mode
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.mode == 'audit_and_remediate' }}"
+    then:
+      - id: pause_for_approval
+        type: io.kestra.plugin.core.flow.Pause
+        timeout: PT24H
+        description: |
+          ⏸️ VALIDATION REQUISE — Actions correctives M365
+          Recommandations a traiter:
+          {{ outputs.generate_report.vars.recommendations_count }} recommandation(s).
+          Veuillez valider dans l'UI Kestra.
+
+      - id: execute_remediation
+        type: io.kestra.plugin.scripts.python.Script
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+          containerImage: automit/python-erp:3.12
+        env:
+          AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+          AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+          AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+        script: |
+          import json
+          import os
+          import requests
+
+          report = json.loads('''{{ outputs.generate_report.vars.report }}''')
+          print("✅ Validation humaine recue — traitement des recommandations")
+
+          # Obtenir un fresh token
+          tenant = os.environ["AZURE_TENANT_ID"]
+          resp = requests.post(
+              f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+              data={
+                  "client_id": os.environ["AZURE_CLIENT_ID"],
+                  "client_secret": os.environ["AZURE_CLIENT_SECRET"],
+                  "scope": "https://graph.microsoft.com/.default",
+                  "grant_type": "client_credentials"
+              }, timeout=30
+          )
+          resp.raise_for_status()
+          token = resp.json()["access_token"]
+          headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+          actions_taken = []
+
+          # Desactiver les comptes inactifs avec licence (economie)
+          inactive = json.loads('''{{ outputs.audit_inactive_users.vars.inactive_report }}''')
+          inactive_users = inactive.get("inactive_users", [])
+          if inactive_users:
+              print(f"\n🔒 Desactivation de {len(inactive_users)} comptes inactifs...")
+              for user in inactive_users[:10]:  # Max 10 par batch
+                  upn = user.get("upn", "")
+                  if not upn:
+                      continue
+                  try:
+                      patch_resp = requests.patch(
+                          f"https://graph.microsoft.com/v1.0/users/{upn}",
+                          headers=headers,
+                          json={"accountEnabled": False},
+                          timeout=10
+                      )
+                      if patch_resp.status_code == 204:
+                          actions_taken.append(f"Desactive: {upn}")
+                          print(f"  ✅ {upn} desactive")
+                      else:
+                          print(f"  ⚠️ {upn}: HTTP {patch_resp.status_code}")
+                  except Exception as e:
+                      print(f"  ❌ {upn}: {e}")
+
+          result = {
+              "actions_taken": actions_taken,
+              "total_actions": len(actions_taken)
+          }
+
+          from kestra import Kestra
+          Kestra.outputs(result)
+          print(f"\n{len(actions_taken)} actions executees")
+
+  # -------------------------------------------------------------------------
+  # 7. Notification Teams
+  # -------------------------------------------------------------------------
+  - id: notify_result
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "{{ outputs.generate_report.vars.overall_status == 'CRITICAL' ? 'FF0000' : outputs.generate_report.vars.overall_status == 'WARNING' ? 'FFA500' : '00CC00' }}",
+        "summary": "📊 Audit M365 — {{ outputs.generate_report.vars.overall_status }}",
+        "sections": [{
+          "activityTitle": "📊 Audit Microsoft 365 — Rapport {{ inputs.mode == 'audit_and_remediate' ? '+ Actions' : 'hebdomadaire' }}",
+          "facts": [
+            {"name": "Statut global", "value": "{{ outputs.generate_report.vars.overall_status }}"},
+            {"name": "Recommandations", "value": "{{ outputs.generate_report.vars.recommendations_count }}"},
+            {"name": "Mode", "value": "{{ inputs.mode }}"},
+            {"name": "Execution", "value": "{{ execution.id }}"}
+          ]
+        }],
+        "potentialAction": [{
+          "@type": "OpenUri",
+          "name": "📋 Details dans Kestra",
+          "targets": [{
+            "os": "default",
+            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+          }]
+        }]
+      }
+
+# -------------------------------------------------------------------------
+# Gestion d'erreur
+# -------------------------------------------------------------------------
+errors:
+  - id: on_error
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "FF0000",
+        "summary": "❌ Erreur audit M365",
+        "sections": [{
+          "activityTitle": "❌ Echec audit M365",
+          "facts": [
+            {"name": "Execution", "value": "{{ execution.id }}"},
+            {"name": "Action", "value": "Verifier les credentials Azure AD dans .env"}
+          ]
+        }]
+      }
+
+triggers:
+  # Audit hebdomadaire chaque lundi a 7h
+  - id: weekly_audit
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 7 * * 1"
+
+  # Webhook pour declenchement ad-hoc (ZeroClaw / Claude Desktop)
+  - id: adhoc_audit
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('KESTRA_WEBHOOK_KEY') }}"
