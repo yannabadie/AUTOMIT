@@ -182,6 +182,7 @@ services:
       - "9090:9090"
     volumes:
       - ./docs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docs/prometheus/alert-rules.yml:/etc/prometheus/rules/alert-rules.yml:ro
     networks:
       - motherson-net
     restart: unless-stopped

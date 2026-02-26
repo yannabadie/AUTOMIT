@@ -1,0 +1,57 @@
+# =============================================================================
+# Prometheus Alerting Rules — AutomIT
+# =============================================================================
+# Metrics pushed via Pushgateway every 5 minutes by Kestra flows.
+# =============================================================================
+
+groups:
+  - name: automit_erp
+    interval: 60s
+    rules:
+      - alert: AutomITERPCritical
+        expr: automit_erp_health == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ERP {{ $labels.system }} is CRITICAL"
+          description: "automit_erp_health{system={{ $labels.system }}} == 0 for 5+ minutes."
+
+      - alert: AutomITCEGIDJobFailures
+        expr: automit_cegid_failed_jobs_last_hour > 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CEGID has {{ $value }} failed jobs in the last hour"
+          description: "More than 2 failed jobs detected."
+
+      - alert: AutomITMCPLatency
+        expr: automit_mcp_response_time_ms > 5000
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MCP server {{ $labels.server }} latency > 5s"
+          description: "MCP response time {{ $value }}ms exceeds threshold."
+
+  - name: automit_m365
+    interval: 60s
+    rules:
+      - alert: AutomITM365LicenseExhaustion
+        expr: automit_m365_license_usage_percent > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "M365 license usage at {{ $value }}%"
+          description: "License utilization above 90%."
+
+      - alert: AutomITM365SecurityAlert
+        expr: automit_m365_security_alerts_high > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} high/critical M365 security alerts"
+          description: "Active security alerts detected via Graph API."
