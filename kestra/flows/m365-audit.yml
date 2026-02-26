@@ -19,6 +19,12 @@ labels:
   autonomy: L1-L2
   compliance: EN9100
 
+sla:
+  - id: max_execution_time
+    type: MAX_DURATION
+    duration: PT48H
+    behavior: CANCEL
+
 inputs:
   - id: mode
     type: STRING
@@ -45,43 +51,15 @@ tasks:
   # 1. Obtenir le token Graph API
   # -------------------------------------------------------------------------
   - id: get_graph_token
-    type: io.kestra.plugin.scripts.python.Script
-    taskRunner:
-      type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
-    env:
-      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
-      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
-      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
-    script: |
-      import json
-      import os
-      import sys
-      import requests
-      from lib.mcp_client import get_graph_token
-
-      tenant = os.environ.get("AZURE_TENANT_ID", "")
-      client_id = os.environ.get("AZURE_CLIENT_ID", "")
-      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
-
-      if not all([tenant, client_id, client_secret]):
-          print("❌ Entra ID credentials non configurees")
-          print("   Remplir AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET dans .env")
-          from kestra import Kestra
-          Kestra.outputs({"authenticated": False, "error": "Credentials manquantes"})
-          sys.exit(1)
-
-      try:
-          token = get_graph_token(tenant, client_id, client_secret)
-          print("✅ Token Graph API obtenu")
-
-          from kestra import Kestra
-          Kestra.outputs({"authenticated": True, "token": token})
-      except Exception as e:
-          print(f"❌ Erreur auth Graph API: {e}")
-          from kestra import Kestra
-          Kestra.outputs({"authenticated": False, "error": str(e)})
-          sys.exit(1)
+    type: io.kestra.plugin.core.flow.Subflow
+    namespace: motherson.it.common
+    flowId: graph-api-token
+    inputs:
+      tenant_id: "{{ secret('AZURE_TENANT_ID') }}"
+      client_id: "{{ secret('AZURE_CLIENT_ID') }}"
+      client_secret: "{{ secret('AZURE_CLIENT_SECRET') }}"
+    wait: true
+    transmitFailed: true
 
   # -------------------------------------------------------------------------
   # 2. Audit licences M365
@@ -96,7 +74,7 @@ tasks:
       import requests
       from datetime import datetime
 
-      token = "{{ outputs.get_graph_token.vars.token }}"
+      token = "{{ outputs.get_graph_token.outputs.access_token }}"
       headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
       report = {
@@ -180,7 +158,7 @@ tasks:
       import requests
       from datetime import datetime, timedelta, timezone
 
-      token = "{{ outputs.get_graph_token.vars.token }}"
+      token = "{{ outputs.get_graph_token.outputs.access_token }}"
       threshold_days = {{ inputs.inactive_days_threshold }}
       headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "ConsistencyLevel": "eventual"}
 
@@ -283,7 +261,7 @@ tasks:
       import requests
       from datetime import datetime, timedelta, timezone
 
-      token = "{{ outputs.get_graph_token.vars.token }}"
+      token = "{{ outputs.get_graph_token.outputs.access_token }}"
       headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
       report = {

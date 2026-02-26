@@ -1,0 +1,56 @@
+id: mcp-health-check
+namespace: motherson.it.common
+
+description: |
+  Subflow reutilisable pour tester la connectivite d'un serveur MCP.
+  Appelle l'outil database_overview et mesure le temps de reponse.
+
+inputs:
+  - id: mcp_url
+    type: STRING
+    required: true
+  - id: mcp_token
+    type: STRING
+    required: true
+  - id: server_name
+    type: STRING
+    required: true
+
+tasks:
+  - id: check_connectivity
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      import time
+      from lib.mcp_client import mcp_call
+      from lib.logging import log_info, log_error
+
+      mcp_url = "{{ inputs.mcp_url }}"
+      mcp_token = "{{ inputs.mcp_token }}"
+      server = "{{ inputs.server_name }}"
+
+      result = {"server": server, "status": "FAIL", "response_time_ms": -1}
+      try:
+          start = time.time()
+          resp = mcp_call(mcp_url, mcp_token, "database_overview", {})
+          elapsed = round((time.time() - start) * 1000)
+          result["status"] = "OK"
+          result["response_time_ms"] = elapsed
+          log_info(f"MCP {server} OK", server=server, response_time_ms=elapsed)
+      except Exception as e:
+          result["error"] = str(e)[:200]
+          log_error(f"MCP {server} FAIL", server=server, error=str(e)[:200])
+
+      from kestra import Kestra
+      Kestra.outputs(result)
+
+outputs:
+  - id: status
+    type: STRING
+    value: "{{ outputs.check_connectivity.vars.status }}"
+  - id: response_time_ms
+    type: INT
+    value: "{{ outputs.check_connectivity.vars.response_time_ms }}"
