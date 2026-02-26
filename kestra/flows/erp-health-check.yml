@@ -605,6 +605,33 @@ tasks:
       from kestra import Kestra
       Kestra.outputs({"global_status": report["global_status"]})
 
+  # -------------------------------------------------------------------------
+  # Store health state in KV for cross-execution correlation
+  # -------------------------------------------------------------------------
+  - id: update_kv_state
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: set_last_check
+        type: io.kestra.plugin.kv.Set
+        key: erp_last_health_check
+        value: "{{ outputs.aggregate_and_forward.vars.report_json }}"
+        namespace: motherson.it.erp
+        overwrite: true
+
+      - id: set_cegid_status
+        type: io.kestra.plugin.kv.Set
+        key: erp_cegid_status
+        value: "{{ outputs.check_cegid.vars.status }}"
+        namespace: motherson.it.erp
+        overwrite: true
+
+      - id: set_check_timestamp
+        type: io.kestra.plugin.kv.Set
+        key: erp_last_check_ts
+        value: "{{ now() }}"
+        namespace: motherson.it.erp
+        overwrite: true
+
 triggers:
   # Surveillance périodique toutes les 5 minutes
   - id: scheduled_health
