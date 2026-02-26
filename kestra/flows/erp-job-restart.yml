@@ -87,6 +87,7 @@ tasks:
       import sys
       import requests
       from lib.mcp_client import mcp_call, parse_mcp_query_result
+      from lib.logging import log_info, log_warn, log_error
 
       erp = "{{ inputs.erp_system }}"
       job = "{{ inputs.job_name }}"
@@ -167,10 +168,10 @@ tasks:
       Kestra.outputs(status)
 
       if not status["can_restart"]:
-          print(f"Job {job} ne peut pas etre relance: {status.get('error_message', '')}")
+          log_error("Job ne peut pas etre relance", erp=erp, job=job, reason=status.get("error_message", ""))
           sys.exit(1)
 
-      print(f"Job {job} peut etre relance - Status: {status['status']}")
+      log_info("Job peut etre relance", erp=erp, job=job, current_status=status["status"])
 
   # -------------------------------------------------------------------------
   # 3. Tenter le restart du job
@@ -191,6 +192,7 @@ tasks:
       import sys
       import requests
       from lib.mcp_client import mcp_call
+      from lib.logging import log_info, log_warn, log_error
 
       erp = "{{ inputs.erp_system }}"
       job = "{{ inputs.job_name }}"
@@ -207,10 +209,10 @@ tasks:
               result["success"] = True
               result["message"] = f"Job '{job}' demarre via MCP cegid-oracle (sp_start_job)"
               result["mcp_response"] = str(resp_data)[:500]
-              print(f"[CEGID] Job {job} relance via MCP cegid-oracle")
+              log_info("Job relance via MCP cegid-oracle", erp="cegid", job=job)
           except Exception as e:
               result["error"] = str(e)
-              print(f"[CEGID] Echec relance job {job}: {e}")
+              log_error("Echec relance job", erp="cegid", job=job, error=str(e))
               sys.exit(1)
 
       # --- Sage X3 (via MCP x3-oracle) ---
@@ -222,10 +224,10 @@ tasks:
               )
               result["success"] = True
               result["mcp_response"] = resp_data if isinstance(resp_data, (dict, str)) else str(resp_data)
-              print(f"[Sage X3] Job {job} relance via MCP x3-oracle")
+              log_info("Job relance via MCP x3-oracle", erp="sage_x3", job=job)
           except Exception as e:
               result["error"] = str(e)
-              print(f"[Sage X3] Echec relance: {e}")
+              log_error("Echec relance job", erp="sage_x3", job=job, error=str(e))
               sys.exit(1)
 
       from kestra import Kestra
@@ -254,11 +256,12 @@ tasks:
       import time
       import requests
       from lib.mcp_client import mcp_call, parse_mcp_query_result
+      from lib.logging import log_info, log_warn, log_error
 
       erp = "{{ inputs.erp_system }}"
       job = "{{ inputs.job_name }}"
 
-      print("Attente 60s pour verification post-restart...")
+      log_info("Attente 60s pour verification post-restart", erp=erp, job=job)
       time.sleep(60)
 
       result = {"job": job, "post_restart_status": "UNKNOWN", "verified": False}
@@ -301,7 +304,7 @@ tasks:
 
       from kestra import Kestra
       Kestra.outputs(result)
-      print(f"Verification post-restart: {result['post_restart_status']}")
+      log_info("Verification post-restart terminee", erp=erp, job=job, post_restart_status=result["post_restart_status"], verified=result["verified"])
 
   # -------------------------------------------------------------------------
   # 5. Notification Teams

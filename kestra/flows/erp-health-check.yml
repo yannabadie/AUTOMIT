@@ -292,6 +292,7 @@ tasks:
       import requests
       from datetime import datetime
       from lib.mcp_client import get_graph_token
+      from lib.logging import log_info, log_warn, log_error
 
       checks = {
           "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -305,7 +306,7 @@ tasks:
       client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
 
       if not all([tenant, client_id, client_secret]):
-          print("⚠️ Entra ID credentials non configurees — mode degrade")
+          log_warn("Entra ID credentials non configurees — mode degrade", service="m365")
           checks["checks"]["auth"] = {"status": "WARNING", "detail": "AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET non configures"}
           checks["overall_status"] = "DEGRADED"
       else:
@@ -484,6 +485,7 @@ tasks:
       import os
       import requests
       from datetime import datetime
+      from lib.logging import log_info, log_warn, log_error
 
       # Agréger les résultats
       report = {
@@ -576,9 +578,9 @@ tasks:
               headers={"Content-Type": "text/plain"},
               timeout=5
           )
-          print(f"📊 Metriques poussees vers Pushgateway: {resp.status_code} ({len(metrics_lines)} metriques)")
+          log_info("Metriques poussees vers Pushgateway", status_code=resp.status_code, metric_count=len(metrics_lines))
       except Exception as e:
-          print(f"⚠️ Pushgateway non joignable: {e} — pas bloquant")
+          log_warn("Pushgateway non joignable — pas bloquant", error=str(e))
 
       # --- Envoyer au ZeroClaw gateway pour analyse proactive ---
       zeroclaw_url = os.getenv("ZEROCLAW_GATEWAY_URL",
@@ -590,9 +592,9 @@ tasks:
               headers={"Authorization": f"Bearer {os.getenv('ZEROCLAW_TOKEN', '')}"},
               timeout=10
           )
-          print(f"📡 Envoyé à ZeroClaw: {resp.status_code}")
+          log_info("Rapport envoye a ZeroClaw", status_code=resp.status_code)
       except Exception as e:
-          print(f"⚠️ ZeroClaw non joignable: {e} — pas bloquant")
+          log_warn("ZeroClaw non joignable — pas bloquant", error=str(e))
 
       from kestra import Kestra
       Kestra.outputs({"global_status": report["global_status"]})
