@@ -1,5 +1,7 @@
 # Secrets
 .env
+!.env.encrypted
+!.env.template
 *.pem
 *.key
 *.crt
