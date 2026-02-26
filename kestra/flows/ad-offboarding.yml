@@ -469,8 +469,10 @@ tasks:
           import os
           import requests
           from lib.mcp_client import mcp_call
+          from lib.sanitize import sanitize_sam_account
 
           sam = "{{ inputs.sam_account }}"
+          sam_safe = sanitize_sam_account(sam)
           erp_access = "{{ inputs.erp_access ?? 'auto' }}"
           result = {"erp_revoked": [], "errors": []}
 
@@ -482,7 +484,7 @@ tasks:
                       os.environ["CEGID_MCP_URL"],
                       os.environ["CEGID_MCP_TOKEN"],
                       "query_database",
-                      {"sql": f"SELECT TOP 1 UTI_LOGIN, UTI_ACTIF FROM UTILISATEURS WHERE UTI_LOGIN LIKE '%{sam}%'", "limit": 1}
+                      {"sql": f"SELECT TOP 1 UTI_LOGIN, UTI_ACTIF FROM UTILISATEURS WHERE UTI_LOGIN LIKE '%{sam_safe}%'", "limit": 1}
                   )
                   print(f"  CEGID: {str(check)[:300]}")
                   result["erp_revoked"].append({
@@ -502,7 +504,7 @@ tasks:
                       os.environ["X3_MCP_URL"],
                       os.environ["X3_MCP_TOKEN"],
                       "query_database",
-                      {"sql": f"SELECT USR_0, ESSION_0 FROM AUTILIS WHERE USR_0 LIKE '%{sam.upper()[:10]}%'", "limit": 1}
+                      {"sql": f"SELECT USR_0, ESSION_0 FROM AUTILIS WHERE USR_0 LIKE '%{sam_safe.upper()[:10]}%'", "limit": 1}
                   )
                   print(f"  X3: {str(check)[:300]}")
                   result["erp_revoked"].append({
