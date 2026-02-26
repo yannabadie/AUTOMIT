@@ -1,0 +1,42 @@
+name: Validate
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint Kestra flows (YAML)
+        run: |
+          yamllint -d "{extends: relaxed, rules: {line-length: {max: 300}, truthy: disable}}" kestra/flows/*.yml
+
+      - name: Validate docker-compose
+        run: docker compose config --quiet
+
+      - name: Check env template completeness
+        run: |
+          echo "Checking all secrets referenced in flows exist in .env.template..."
+          MISSING=0
+          for secret in $(grep -hro "secret('[^']*')" kestra/flows/*.yml | sort -u | sed "s/secret('//;s/')//"); do
+            if ! grep -q "^${secret}=" .env.template && ! grep -q "^${secret}=" .env.template; then
+              echo "MISSING: $secret (referenced in flows but not in .env.template)"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+          if [ $MISSING -gt 0 ]; then
+            echo "ERROR: $MISSING secrets missing from .env.template"
+            exit 1
+          fi
+          echo "All secrets accounted for in .env.template"
+
+      - name: Validate Python library syntax
+        run: python -c "import ast; ast.parse(open('scripts/lib/mcp_client.py').read()); print('OK')"
