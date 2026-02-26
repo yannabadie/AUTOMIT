@@ -1,11 +1,28 @@
-# MemoriPilot: System Architect
+# Architect Notes
 
-## Overview
-This file contains the architectural decisions and design patterns for the MemoriPilot project.
+## Architecture Overview
+```
+Claude Desktop (MCP) ------> Kestra (orchestration)
+                                   |
+ZeroClaw (AI agent) --webhook----> Kestra flows
+                                   |
+                         Infrastructure (AD, M365, CEGID, X3)
+```
 
-## Architectural Decisions
+## Key Constraints
+1. ZeroClaw never touches infrastructure directly (always via Kestra webhooks)
+2. ERP access exclusively via MCP servers (no direct SQL)
+3. All sensitive operations require human approval (L2 Pause)
+4. Docker isolation for all task execution
+5. Corporate MITM proxy requires CA bundle injection
 
-1. **Decision 1**: Description of the decision and its rationale.
-2. **Decision 2**: Description of the decision and its rationale.
-3. **Decision 3**: Description of the decision and its rationale.
+## Container Architecture
+- Kestra manages Docker socket — spawns sibling containers for tasks
+- automit/python-erp:3.12 = base image for all Python tasks
+- mcr.microsoft.com/powershell:latest = base for AD tasks (Linux, needs RSAT workaround)
+- nginx:alpine = TLS termination sidecar for ZeroClaw to OpenAI
 
+## Open Questions
+- AD PowerShell in Linux containers: Windows container, PSRemoting, or Python ldap3?
+- ServiceNow/GLPI integration: REST API or email-to-ticket?
+- Multi-site monitoring: single Kestra instance or federated?
