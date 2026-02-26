@@ -24,8 +24,9 @@ et surveillance proactive par agent IA (ZeroClaw).
     │ • erp-job-restart    │  │  • Analyse rapports santé      │
     │ • ad-maintenance     │  │  • Corrélation patterns        │
     │ • incident-escal-l2  │  │  • Décision L1/L2/L3          │
-    │ • onboarding (TODO)  │  │  • Trigger flows Kestra        │
-    │ • m365-audit (TODO)  │  │  • Notification Teams          │
+    │ • ad-onboarding      │  │  • Trigger flows Kestra        │
+    │ • ad-offboarding     │  │  • Notification Teams + email  │
+    │ • m365-audit         │  │                                │
     │                      │  │                                │
     │ Audit trail complet  │  │ Mémoire SQLite locale          │
     │ UI Dashboard         │  │ 3.4MB, <5MB RAM                │
@@ -123,21 +124,37 @@ Ensuite dans Claude Desktop, vous pouvez :
 
 ```
 motherson-it-automation/
-├── docker-compose.yml          # Stack complète
-├── .env.template               # Variables d'environnement
+├── docker-compose.yml              # Stack complete (base + local-llm + monitoring)
+├── .env.template                   # Variables d'environnement
 ├── kestra/
 │   └── flows/
-│       ├── erp-health-check.yml    # Surveillance ERP (cron 5min)
-│       ├── erp-job-restart.yml     # Relance jobs ERP (webhook L1)
+│       ├── erp-health-check.yml        # Surveillance ERP (cron 5min)
+│       ├── erp-job-restart.yml         # Relance jobs ERP (webhook L1)
 │       ├── incident-escalation-l2.yml  # Escalade incidents (L2)
-│       └── ad-maintenance.yml      # Nettoyage AD (hebdo + webhook)
+│       ├── ad-maintenance.yml          # Nettoyage AD (hebdo + webhook)
+│       ├── ad-onboarding.yml           # Onboarding IT (L2, 4-eyes)
+│       ├── ad-offboarding.yml          # Offboarding IT (L2, 4-eyes)
+│       └── m365-audit.yml             # Audit M365 (hebdo + webhook)
 ├── zeroclaw/
-│   ├── config.toml             # Configuration agent
-│   └── IDENTITY.md             # Persona agent IT
-├── scripts/                    # Scripts de monitoring (TODO)
-└── docs/
-    ├── claude_desktop_config.json  # Config MCP Claude Desktop
-    └── prometheus.yml              # Config Prometheus (TODO)
+│   ├── config.toml                 # Configuration agent
+│   ├── IDENTITY.md                 # Persona agent IT
+│   ├── openai-proxy.conf           # nginx reverse proxy config
+│   └── ca-bundle.pem               # Corporate CA bundle
+├── scripts/
+│   ├── lib/
+│   │   ├── __init__.py
+│   │   └── mcp_client.py           # Shared MCP + Graph API client
+│   ├── docker/
+│   │   ├── Dockerfile.python-erp   # Custom Python image (ODBC 17 + CA)
+│   │   └── requirements-erp.txt
+│   ├── erp/
+│   │   └── test_connectivity.py    # MCP connectivity tests (8 tests)
+│   └── sync-codex-tokens.py        # Token sync Codex CLI -> ZeroClaw
+├── docs/
+│   ├── prometheus.yml              # Prometheus scraping config
+│   ├── grafana/                    # Grafana provisioning + dashboards
+│   └── plans/                      # Implementation plans
+└── memory-bank/                    # Project knowledge base
 ```
 
 ## Boucle de contrôle — Comment ça fonctionne
@@ -168,28 +185,32 @@ motherson-it-automation/
 
 ## Roadmap PoC → Production
 
-### Phase 1 — PoC (2 semaines)
+### Phase 1 — PoC (2 semaines) ✅
 - [x] Architecture Kestra + ZeroClaw
 - [x] Flows ERP monitoring
 - [x] Agent config + identity
-- [ ] Connexion réelle CEGID (remplacer les TODO)
-- [ ] Connexion réelle Sage X3 (via X3-Oracle MCP existant)
-- [ ] Test end-to-end sur environnement de dev
+- [x] Connexion reelle CEGID (via MCP cegid-oracle)
+- [x] Connexion reelle Sage X3 (via MCP x3-oracle)
+- [x] Onboarding/offboarding flows (L2, 4-eyes EN9100)
+- [x] Microsoft Graph API integration (health, licences, securite)
+- [x] Grafana dashboard (Prometheus + Pushgateway, 18 panels)
+- [x] Email notifications via Graph API Mail.Send
 
 ### Phase 2 — Pilote (1 mois)
-- [ ] Intégration Microsoft Graph API (M365)
-- [ ] Connexion AD réelle (PowerShell AD module)
-- [ ] Flow onboarding/offboarding
-- [ ] Dashboard Grafana temps réel
-- [ ] Agent en mode L3 uniquement (observation + recommandation)
+- [ ] Entra ID App Registration (RSSI approval)
+- [ ] Connexion AD reelle (PowerShell AD module + delegation OUs)
+- [ ] Deploiement sur VM cible (002_srvcgdtest.adgroupe.com)
+- [ ] Agent ZeroClaw en mode L3 (observation + recommandation)
+- [ ] Test end-to-end sur environnement de dev
+- [ ] ad-maintenance.yml avec cmdlets reelles (remplacer stubs)
 
 ### Phase 3 — Production (2 mois)
-- [ ] Activation progressive L1 (actions pré-approuvées)
-- [ ] Intégration ServiceNow/GLPI
+- [ ] Activation progressive L1 (actions pre-approuvees)
+- [ ] Integration ServiceNow/GLPI
 - [ ] Agent multicanal (Teams + Slack)
-- [ ] Audit trail conformité EN9100
-- [ ] Documentation opérationnelle
-- [ ] Formation équipe IT
+- [ ] Audit trail conformite EN9100
+- [ ] Documentation operationnelle
+- [ ] Formation equipe IT
 
 ## Sécurité
 
