@@ -1,0 +1,370 @@
+# =============================================================================
+# FLOW: VMware vSphere Health Check
+# Triggered by: Schedule (cron 15min) + ZeroClaw webhook
+# Action: Collecte metriques ESXi hosts + datastores, pousse vers Pushgateway
+# Autonomy Level: L1 (observation + alerte automatique)
+# =============================================================================
+id: vmware-health-check
+namespace: motherson.it.infra
+
+description: |
+  Surveillance sante VMware vSphere toutes les 15 minutes.
+  Verifie: etat des hotes ESXi, capacite datastores (seuil 85%).
+  Pousse les metriques vers Prometheus Pushgateway.
+  Alerte Teams si WARNING ou CRITICAL.
+
+labels:
+  team: it-ops
+  criticality: high
+  autonomy: L1
+
+variables:
+  teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+
+tasks:
+  # -------------------------------------------------------------------------
+  # 1. Check vSphere — ESXi hosts + datastores
+  # -------------------------------------------------------------------------
+  - id: check_vsphere
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      VSPHERE_HOST: "{{ secret('VSPHERE_HOST') }}"
+      VSPHERE_USER: "{{ secret('VSPHERE_USER') }}"
+      VSPHERE_PASSWORD: "{{ secret('VSPHERE_PASSWORD') }}"
+      VSPHERE_VERIFY_SSL: "{{ secret('VSPHERE_VERIFY_SSL') }}"
+    script: |
+      import json
+      import os
+      import sys
+      import time
+      import requests
+      from datetime import datetime
+
+      vsphere_host = os.environ.get("VSPHERE_HOST", "")
+      vsphere_user = os.environ.get("VSPHERE_USER", "")
+      vsphere_password = os.environ.get("VSPHERE_PASSWORD", "")
+      verify_ssl = os.environ.get("VSPHERE_VERIFY_SSL", "false").lower() == "true"
+
+      report = {
+          "timestamp": datetime.utcnow().isoformat() + "Z",
+          "source": "vmware-health-check",
+          "vsphere_host": vsphere_host,
+          "hosts": [],
+          "datastores": [],
+          "errors": [],
+          "status": "HEALTHY"
+      }
+
+      # --- Skip si credentials absentes ---
+      if not all([vsphere_host, vsphere_user, vsphere_password]):
+          print(json.dumps({"level": "INFO", "msg": "vSphere credentials non configurees — SKIP"}))
+          report["status"] = "SKIP"
+          from kestra import Kestra
+          Kestra.outputs({"report": json.dumps(report), "status": "SKIP"})
+          sys.exit(0)
+
+      # --- Desactiver les warnings SSL si verify_ssl=false ---
+      if not verify_ssl:
+          import urllib3
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+      base_url = f"https://{vsphere_host}"
+      session_id = None
+
+      try:
+          # --- Authentification vSphere REST API ---
+          print(json.dumps({"level": "INFO", "msg": f"Connexion vSphere {vsphere_host}"}))
+          t0 = time.time()
+          auth_resp = requests.post(
+              f"{base_url}/api/session",
+              auth=(vsphere_user, vsphere_password),
+              verify=verify_ssl,
+              timeout=15
+          )
+          auth_ms = round((time.time() - t0) * 1000)
+
+          if auth_resp.status_code not in (200, 201):
+              report["errors"].append(f"Auth failed: HTTP {auth_resp.status_code}")
+              report["status"] = "ERROR"
+              print(json.dumps({"level": "ERROR", "msg": f"vSphere auth failed: HTTP {auth_resp.status_code}"}))
+              from kestra import Kestra
+              Kestra.outputs({"report": json.dumps(report), "status": "ERROR"})
+              sys.exit(0)
+
+          session_id = auth_resp.json() if auth_resp.headers.get("Content-Type", "").startswith("application/json") else auth_resp.text.strip('"')
+          headers = {"vmware-api-session-id": session_id}
+          report["auth_response_ms"] = auth_ms
+          print(json.dumps({"level": "INFO", "msg": f"vSphere auth OK ({auth_ms}ms)"}))
+
+          # --- ESXi Hosts ---
+          try:
+              resp = requests.get(
+                  f"{base_url}/api/vcenter/host",
+                  headers=headers,
+                  verify=verify_ssl,
+                  timeout=15
+              )
+              if resp.status_code == 200:
+                  hosts = resp.json()
+                  for h in hosts:
+                      host_entry = {
+                          "name": h.get("name", "unknown"),
+                          "host_id": h.get("host", ""),
+                          "connection_state": h.get("connection_state", "UNKNOWN"),
+                          "power_state": h.get("power_state", "UNKNOWN")
+                      }
+                      report["hosts"].append(host_entry)
+
+                      if h.get("connection_state") != "CONNECTED":
+                          report["errors"].append(
+                              f"Host {h.get('name', '?')} state: {h.get('connection_state', '?')}"
+                          )
+
+                  print(json.dumps({
+                      "level": "INFO",
+                      "msg": f"ESXi hosts: {len(hosts)} trouves, "
+                             f"{sum(1 for h in hosts if h.get('connection_state') == 'CONNECTED')} connectes"
+                  }))
+              else:
+                  report["errors"].append(f"GET /api/vcenter/host: HTTP {resp.status_code}")
+                  print(json.dumps({"level": "WARNING", "msg": f"Hosts API: HTTP {resp.status_code}"}))
+          except Exception as e:
+              report["errors"].append(f"Hosts check error: {str(e)[:200]}")
+              print(json.dumps({"level": "ERROR", "msg": f"Hosts check error: {e}"}))
+
+          # --- Datastores ---
+          try:
+              resp = requests.get(
+                  f"{base_url}/api/vcenter/datastore",
+                  headers=headers,
+                  verify=verify_ssl,
+                  timeout=15
+              )
+              if resp.status_code == 200:
+                  datastores = resp.json()
+                  for ds in datastores:
+                      capacity = ds.get("capacity", 0)
+                      free_space = ds.get("free_space", 0)
+                      used = capacity - free_space if capacity > 0 else 0
+                      used_pct = round(used / capacity * 100, 1) if capacity > 0 else 0.0
+                      free_gb = round(free_space / (1024 ** 3), 2)
+
+                      ds_entry = {
+                          "name": ds.get("name", "unknown"),
+                          "datastore_id": ds.get("datastore", ""),
+                          "type": ds.get("type", "UNKNOWN"),
+                          "capacity_bytes": capacity,
+                          "free_space_bytes": free_space,
+                          "used_percent": used_pct,
+                          "free_gb": free_gb
+                      }
+                      report["datastores"].append(ds_entry)
+
+                      if used_pct > 85:
+                          report["errors"].append(
+                              f"Datastore {ds.get('name', '?')}: {used_pct}% utilise ({free_gb} GB libres)"
+                          )
+
+                  print(json.dumps({
+                      "level": "INFO",
+                      "msg": f"Datastores: {len(datastores)} trouves, "
+                             f"{sum(1 for d in report['datastores'] if d['used_percent'] > 85)} au-dessus de 85%"
+                  }))
+              else:
+                  report["errors"].append(f"GET /api/vcenter/datastore: HTTP {resp.status_code}")
+                  print(json.dumps({"level": "WARNING", "msg": f"Datastore API: HTTP {resp.status_code}"}))
+          except Exception as e:
+              report["errors"].append(f"Datastore check error: {str(e)[:200]}")
+              print(json.dumps({"level": "ERROR", "msg": f"Datastore check error: {e}"}))
+
+          # --- Determiner le statut global ---
+          disconnected_hosts = [
+              h for h in report["hosts"]
+              if h.get("connection_state") != "CONNECTED"
+          ]
+          critical_datastores = [
+              d for d in report["datastores"]
+              if d.get("used_percent", 0) > 90
+          ]
+          warning_datastores = [
+              d for d in report["datastores"]
+              if 85 < d.get("used_percent", 0) <= 90
+          ]
+
+          if disconnected_hosts or critical_datastores:
+              report["status"] = "CRITICAL"
+          elif warning_datastores or report["errors"]:
+              report["status"] = "WARNING"
+          else:
+              report["status"] = "HEALTHY"
+
+      except Exception as e:
+          report["errors"].append(f"vSphere global error: {str(e)[:300]}")
+          report["status"] = "ERROR"
+          print(json.dumps({"level": "ERROR", "msg": f"vSphere global error: {e}"}))
+
+      finally:
+          # --- Logout ---
+          if session_id:
+              try:
+                  requests.delete(
+                      f"{base_url}/api/session",
+                      headers={"vmware-api-session-id": session_id},
+                      verify=verify_ssl,
+                      timeout=5
+                  )
+                  print(json.dumps({"level": "INFO", "msg": "vSphere session fermee"}))
+              except Exception:
+                  pass
+
+      from kestra import Kestra
+      Kestra.outputs({"report": json.dumps(report), "status": report["status"]})
+      print(json.dumps(report, indent=2))
+
+  # -------------------------------------------------------------------------
+  # 2. Push metriques vers Prometheus Pushgateway
+  # -------------------------------------------------------------------------
+  - id: push_metrics
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      import os
+      import requests
+
+      report = json.loads('''{{ outputs.check_vsphere.vars.report }}''')
+      status = "{{ outputs.check_vsphere.vars.status }}"
+
+      pushgw_url = os.getenv("PUSHGATEWAY_URL", "http://pushgateway:9091")
+      status_map = {"HEALTHY": 2, "WARNING": 1, "CRITICAL": 0, "ERROR": -1, "SKIP": -1}
+
+      metrics_lines = []
+
+      # --- Statut global VMware ---
+      metrics_lines.append(
+          f"automit_vmware_health {status_map.get(status, -1)}"
+      )
+
+      # --- Metriques hosts ---
+      hosts = report.get("hosts", [])
+      hosts_total = len(hosts)
+      hosts_connected = sum(
+          1 for h in hosts if h.get("connection_state") == "CONNECTED"
+      )
+      metrics_lines.append(f"automit_vmware_hosts_total {hosts_total}")
+      metrics_lines.append(f"automit_vmware_hosts_connected {hosts_connected}")
+
+      # --- Metriques datastores ---
+      for ds in report.get("datastores", []):
+          ds_name = ds.get("name", "unknown").replace('"', '\\"')
+          used_pct = ds.get("used_percent", 0)
+          free_gb = ds.get("free_gb", 0)
+          metrics_lines.append(
+              f'automit_vmware_datastore_used_percent{{datastore="{ds_name}"}} {used_pct}'
+          )
+          metrics_lines.append(
+              f'automit_vmware_datastore_free_gb{{datastore="{ds_name}"}} {free_gb}'
+          )
+
+      # --- Compteur erreurs ---
+      errors_total = len(report.get("errors", []))
+      metrics_lines.append(f"automit_vmware_errors_total {errors_total}")
+
+      # --- Push vers Pushgateway ---
+      try:
+          payload = "\n".join(metrics_lines) + "\n"
+          resp = requests.post(
+              f"{pushgw_url}/metrics/job/automit_vmware_health",
+              data=payload,
+              headers={"Content-Type": "text/plain"},
+              timeout=5
+          )
+          print(json.dumps({
+              "level": "INFO",
+              "msg": f"Metriques VMware poussees vers Pushgateway: {resp.status_code} ({len(metrics_lines)} metriques)"
+          }))
+      except Exception as e:
+          print(json.dumps({
+              "level": "WARNING",
+              "msg": f"Pushgateway non joignable: {e} — pas bloquant"
+          }))
+
+      from kestra import Kestra
+      Kestra.outputs({"metrics_count": len(metrics_lines)})
+
+  # -------------------------------------------------------------------------
+  # 3. Notification Teams (si WARNING ou CRITICAL)
+  # -------------------------------------------------------------------------
+  - id: notify_teams
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ outputs.check_vsphere.vars.status != 'HEALTHY' and outputs.check_vsphere.vars.status != 'SKIP' }}"
+    then:
+      - id: send_teams_alert
+        type: io.kestra.plugin.core.http.Request
+        uri: "{{ vars.teams_webhook_url }}"
+        method: POST
+        contentType: application/json
+        body: |
+          {
+            "@type": "MessageCard",
+            "themeColor": "{{ outputs.check_vsphere.vars.status == 'CRITICAL' or outputs.check_vsphere.vars.status == 'ERROR' ? 'FF0000' : 'FFA500' }}",
+            "summary": "VMware vSphere — {{ outputs.check_vsphere.vars.status }}",
+            "sections": [{
+              "activityTitle": "🖥️ VMware vSphere Health Check — {{ outputs.check_vsphere.vars.status }}",
+              "facts": [
+                {"name": "Statut", "value": "{{ outputs.check_vsphere.vars.status }}"},
+                {"name": "Execution", "value": "{{ execution.id }}"}
+              ],
+              "text": "Anomalie detectee sur l'infrastructure VMware. Verifier les details dans Kestra."
+            }],
+            "potentialAction": [{
+              "@type": "OpenUri",
+              "name": "Details dans Kestra",
+              "targets": [{
+                "os": "default",
+                "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+              }]
+            }]
+          }
+
+# ---------------------------------------------------------------------------
+# ERROR HANDLER
+# ---------------------------------------------------------------------------
+errors:
+  - id: on_error
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "FF0000",
+        "summary": "Erreur VMware Health Check",
+        "sections": [{
+          "activityTitle": "Echec VMware vSphere Health Check",
+          "facts": [
+            {"name": "Execution", "value": "{{ execution.id }}"},
+            {"name": "Action", "value": "Verifier les credentials vSphere dans .env"}
+          ]
+        }]
+      }
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  # Surveillance periodique toutes les 15 minutes
+  - id: scheduled_check
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "*/15 * * * *"
+
+  # Webhook pour declenchement ad-hoc (ZeroClaw / Claude Desktop)
+  - id: adhoc_check
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('WEBHOOK_KEY_VMWARE_HEALTH') }}"
