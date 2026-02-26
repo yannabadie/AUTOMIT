@@ -219,6 +219,24 @@ services:
       - ./docs/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+      - loki
+    networks:
+      - motherson-net
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # ---------------------------------------------------------------------------
+  # LOKI — Log Aggregation
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./docs/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
     networks:
       - motherson-net
     restart: unless-stopped
@@ -230,6 +248,7 @@ volumes:
   postgres-data:
   ollama-models:
   grafana-data:
+  loki-data:
 
 networks:
   motherson-net:
