@@ -107,6 +107,8 @@ inputs:
 variables:
   teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
   ad_domain: "{{ secret('AD_DOMAIN') }}"
+  service_mailbox: "{{ secret('M365_SERVICE_MAILBOX') }}"
+  it_team_email: "{{ secret('M365_IT_TEAM_EMAIL') }}"
 
 tasks:
   # -------------------------------------------------------------------------
@@ -615,6 +617,110 @@ tasks:
           }]
         }]
       }
+
+  # -------------------------------------------------------------------------
+  # 8. Email au manager — recapitulatif onboarding (Graph API Mail.Send)
+  # -------------------------------------------------------------------------
+  - id: email_onboarding_complete
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+      M365_SERVICE_MAILBOX: "{{ secret('M365_SERVICE_MAILBOX') }}"
+      M365_IT_TEAM_EMAIL: "{{ secret('M365_IT_TEAM_EMAIL') }}"
+    script: |
+      import json
+      import os
+      import requests
+
+      tenant = os.environ.get("AZURE_TENANT_ID", "")
+      client_id = os.environ.get("AZURE_CLIENT_ID", "")
+      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+      service_mailbox = os.environ.get("M365_SERVICE_MAILBOX", "")
+
+      if not all([tenant, client_id, client_secret, service_mailbox]):
+          print("⚠️ Email non envoye — Entra ID ou boite de service non configurees")
+          print("   Notification Teams deja envoyee (fallback)")
+          from kestra import Kestra
+          Kestra.outputs({"email_sent": False, "reason": "credentials_missing"})
+      else:
+          try:
+              # Token Graph API
+              token_resp = requests.post(
+                  f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+                  data={
+                      "client_id": client_id, "client_secret": client_secret,
+                      "scope": "https://graph.microsoft.com/.default",
+                      "grant_type": "client_credentials"
+                  }, timeout=30
+              )
+              token_resp.raise_for_status()
+              access_token = token_resp.json()["access_token"]
+
+              display_name = "{{ outputs.prepare_provisioning_plan.vars.display_name }}"
+              sam = "{{ outputs.prepare_provisioning_plan.vars.sam_account }}"
+              upn = "{{ outputs.prepare_provisioning_plan.vars.upn }}"
+              ticket_id = "{{ outputs.prepare_provisioning_plan.vars.ticket_id }}"
+              manager_email = "{{ inputs.manager_email }}"
+              it_email = os.environ.get("M365_IT_TEAM_EMAIL", "")
+
+              subject = f"[AutomIT] Onboarding IT termine — {display_name} ({ticket_id})"
+              html_body = f"""
+              <h2>Onboarding IT termine</h2>
+              <p>Le provisioning IT du nouveau collaborateur est termine.</p>
+              <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
+                <tr><td><b>Collaborateur</b></td><td>{display_name}</td></tr>
+                <tr><td><b>Login AD</b></td><td>{sam}</td></tr>
+                <tr><td><b>Email</b></td><td>{upn}</td></tr>
+                <tr><td><b>Poste</b></td><td>{"{{ inputs.job_title }}"}</td></tr>
+                <tr><td><b>Service</b></td><td>{"{{ inputs.department }}"}</td></tr>
+                <tr><td><b>Site</b></td><td>{"{{ inputs.site }}"}</td></tr>
+                <tr><td><b>Date d'arrivee</b></td><td>{"{{ inputs.start_date }}"}</td></tr>
+                <tr><td><b>Licence M365</b></td><td>{"{{ inputs.m365_license ?? 'E3' }}"}</td></tr>
+                <tr><td><b>Acces ERP</b></td><td>{"{{ inputs.erp_access ?? 'none' }}"}</td></tr>
+                <tr><td><b>Ticket</b></td><td>{ticket_id}</td></tr>
+              </table>
+              <p><b>Note :</b> Le mot de passe temporaire sera communique separement par le service IT.</p>
+              <hr>
+              <p style="color:#888;font-size:12px;">AutomIT — Motherson Aerospace IT Automation</p>
+              """
+
+              recipients = [{"emailAddress": {"address": manager_email}}]
+              if it_email:
+                  recipients.append({"emailAddress": {"address": it_email}})
+
+              send_url = f"https://graph.microsoft.com/v1.0/users/{service_mailbox}/sendMail"
+              email_payload = {
+                  "message": {
+                      "subject": subject,
+                      "body": {"contentType": "HTML", "content": html_body},
+                      "toRecipients": recipients
+                  },
+                  "saveToSentItems": "true"
+              }
+
+              resp = requests.post(send_url, headers={
+                  "Authorization": f"Bearer {access_token}",
+                  "Content-Type": "application/json"
+              }, json=email_payload, timeout=30)
+
+              if resp.status_code == 202:
+                  print(f"✅ Email onboarding envoye a {manager_email}" + (f" + {it_email}" if it_email else ""))
+                  from kestra import Kestra
+                  Kestra.outputs({"email_sent": True, "recipients": [manager_email, it_email]})
+              else:
+                  print(f"⚠️ Email: HTTP {resp.status_code} — {resp.text[:300]}")
+                  from kestra import Kestra
+                  Kestra.outputs({"email_sent": False, "http_status": resp.status_code, "detail": resp.text[:200]})
+
+          except Exception as e:
+              print(f"⚠️ Erreur envoi email: {e}")
+              from kestra import Kestra
+              Kestra.outputs({"email_sent": False, "error": str(e)})
 
 # -------------------------------------------------------------------------
 # Gestion timeout / erreur

@@ -14,16 +14,16 @@ The platform monitors CEGID XRP Sprint, Sage X3, Active Directory, and Microsoft
 - **L2**: Agent proposes, human approves via Kestra Pause (e.g., disable compromised AD account)
 - **L3**: Agent recommends, human acts (e.g., "increase timeout for recurring failures")
 
-**Status**: PoC complet — les 4 priorites sont implementees. AD PowerShell et Entra ID credentials restent a configurer en prod.
+**Status**: PoC complet — les 4 priorites sont implementees + envoi mail Graph API. Entra ID App Registration + Application Access Policy a configurer en prod.
 
-**Priorities**: (1) ~~Real ERP connections~~ DONE, (2) ~~Onboarding/offboarding flow~~ DONE, (3) ~~Microsoft Graph API integration~~ DONE, (4) ~~Grafana dashboard~~ DONE.
+**Priorities**: (1) ~~Real ERP connections~~ DONE, (2) ~~Onboarding/offboarding flow~~ DONE, (3) ~~Microsoft Graph API integration~~ DONE, (4) ~~Grafana dashboard~~ DONE, (5) ~~Email notifications via Graph API Mail.Send~~ DONE.
 
 ## Target Infrastructure
 
 - **Sage X3 (production)**: Accès **exclusivement via MCP x3-oracle** (`MAS_D0Z9TB4:8001`), pas de connexion SQL directe. Token auth `X-MCP-TOKEN`.
 - **CEGID XRP Sprint (MSC Maroc)**: Accès **exclusivement via MCP cegid-oracle** (`10.255.15.200:8000`). 20 outils MCP dont `query_database` (SQL read-only), `analyze_data_freshness`, `database_overview`. Token auth `X-MCP-TOKEN`. DB: `Y2_MSC_MAROC`. API REST désactivée (`CEGID_API_ENABLED=false`). Knowledge base: DB `CEGID_KB`. Domaine Windows: `MIND`. **Pas de connexion SQL directe** (port 1433 non accessible depuis Docker/réseau local).
 - **AD**: Windows Server 2022, DC: `dc01.motherson.local` / Compte service: `ADGROUPE\t1_yaa`
-- **M365**: E3 license, tenant: `adigroupe.onmicrosoft.com`
+- **M365**: E3 license, tenant: `adigroupe.onmicrosoft.com`. Entra ID App Registration requise (permissions: User.Read.All, Directory.Read.All, AuditLog.Read.All, Reports.Read.All, ServiceHealth.Read.All, SecurityEvents.Read.All, IdentityRiskyUser.Read.All, Mail.Send). Email: shared mailbox `automit-noreply@adigroupe.onmicrosoft.com` avec Application Access Policy pour restreindre Mail.Send.
 - **Compliance**: EN9100 (aerospace), sites Serre-Castet + Tanger
 
 ### SSL/TLS Workarounds
@@ -126,7 +126,16 @@ Flows are YAML files in `kestra/flows/`, auto-loaded via volume mount to `/app/f
 2. **Inputs**: Type-safe with defaults and allowed values
 3. **Tasks**: Docker-isolated Python/PowerShell scripts using `automit/python-erp:3.12` (includes ODBC 17, corporate CA, pyodbc, requests, kestra SDK)
 4. **Outputs**: Structured JSON
-5. **Notifications**: Teams webhook on success/failure
+5. **Notifications**: Teams webhook + email Graph API (double canal)
+
+### Email Notifications (Graph API Mail.Send)
+
+Les flows onboarding, offboarding, m365-audit et incident-escalation envoient des emails via `POST /users/{mailbox}/sendMail`. Pattern :
+- **Sender**: `automit-noreply@adigroupe.onmicrosoft.com` (shared mailbox, Application Access Policy)
+- **Recipients**: `manager_email` (input) + `M365_IT_TEAM_EMAIL` (env var)
+- **Format**: HTML (tableau récapitulatif)
+- **Fallback**: Si credentials Entra ID absentes, l'email n'est pas envoyé (notification Teams reste active)
+- **Variables secrets**: `M365_SERVICE_MAILBOX`, `M365_IT_TEAM_EMAIL`, `AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET`
 
 **Important**: All ERP access goes through MCP servers, never direct SQL. CEGID uses `query_database` tool for read queries and `sp_start_job` for job restarts. Sage X3 uses `batch_status`/`batch_restart` tools.
 

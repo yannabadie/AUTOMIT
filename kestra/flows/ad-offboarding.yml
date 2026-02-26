@@ -76,6 +76,8 @@ inputs:
 
 variables:
   teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+  service_mailbox: "{{ secret('M365_SERVICE_MAILBOX') }}"
+  it_team_email: "{{ secret('M365_IT_TEAM_EMAIL') }}"
 
 tasks:
   # -------------------------------------------------------------------------
@@ -574,6 +576,106 @@ tasks:
           }]
         }]
       }
+
+  # -------------------------------------------------------------------------
+  # 9. Email de confirmation offboarding (Graph API Mail.Send)
+  # -------------------------------------------------------------------------
+  - id: email_offboarding_complete
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+      M365_SERVICE_MAILBOX: "{{ secret('M365_SERVICE_MAILBOX') }}"
+      M365_IT_TEAM_EMAIL: "{{ secret('M365_IT_TEAM_EMAIL') }}"
+    script: |
+      import json
+      import os
+      import requests
+
+      tenant = os.environ.get("AZURE_TENANT_ID", "")
+      client_id = os.environ.get("AZURE_CLIENT_ID", "")
+      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+      service_mailbox = os.environ.get("M365_SERVICE_MAILBOX", "")
+
+      if not all([tenant, client_id, client_secret, service_mailbox]):
+          print("⚠️ Email non envoye — Entra ID ou boite de service non configurees")
+          from kestra import Kestra
+          Kestra.outputs({"email_sent": False, "reason": "credentials_missing"})
+      else:
+          try:
+              token_resp = requests.post(
+                  f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+                  data={
+                      "client_id": client_id, "client_secret": client_secret,
+                      "scope": "https://graph.microsoft.com/.default",
+                      "grant_type": "client_credentials"
+                  }, timeout=30
+              )
+              token_resp.raise_for_status()
+              access_token = token_resp.json()["access_token"]
+
+              sam = "{{ inputs.sam_account }}"
+              ticket_id = "{{ outputs.prepare_offboarding_plan.vars.ticket_id }}"
+              manager_email = "{{ inputs.manager_email }}"
+              reason = "{{ inputs.departure_reason }}"
+              departure_date = "{{ inputs.departure_date }}"
+              it_email = os.environ.get("M365_IT_TEAM_EMAIL", "")
+
+              subject = f"[AutomIT] Offboarding IT termine — {sam} ({ticket_id})"
+              html_body = f"""
+              <h2>Offboarding IT termine</h2>
+              <p>Le deprovisioning IT du collaborateur sortant est termine.</p>
+              <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
+                <tr><td><b>Collaborateur</b></td><td>{sam}</td></tr>
+                <tr><td><b>Raison</b></td><td>{reason}</td></tr>
+                <tr><td><b>Date de depart</b></td><td>{departure_date}</td></tr>
+                <tr><td><b>Compte AD</b></td><td>Desactive + deplace vers Disabled_Users</td></tr>
+                <tr><td><b>Mot de passe</b></td><td>Reinitialise (aleatoire)</td></tr>
+                <tr><td><b>Groupes AD</b></td><td>Tous retires</td></tr>
+                <tr><td><b>Compte M365</b></td><td>Desactive + sessions revoquees</td></tr>
+                <tr><td><b>Boite mail</b></td><td>{"Archivee (retention 30j)" if {"{{ inputs.archive_mailbox }}"} == "true" else "Non archivee"}</td></tr>
+                <tr><td><b>Acces ERP</b></td><td>Verifie — escalade admin si necessaire</td></tr>
+                <tr><td><b>Ticket</b></td><td>{ticket_id}</td></tr>
+              </table>
+              <p><b>Retention :</b> Le compte AD reste dans OU=Disabled_Users pendant 90 jours avant suppression definitive.</p>
+              <hr>
+              <p style="color:#888;font-size:12px;">AutomIT — Motherson Aerospace IT Automation</p>
+              """
+
+              recipients = [{"emailAddress": {"address": manager_email}}]
+              if it_email:
+                  recipients.append({"emailAddress": {"address": it_email}})
+
+              send_url = f"https://graph.microsoft.com/v1.0/users/{service_mailbox}/sendMail"
+              resp = requests.post(send_url, headers={
+                  "Authorization": f"Bearer {access_token}",
+                  "Content-Type": "application/json"
+              }, json={
+                  "message": {
+                      "subject": subject,
+                      "body": {"contentType": "HTML", "content": html_body},
+                      "toRecipients": recipients
+                  },
+                  "saveToSentItems": "true"
+              }, timeout=30)
+
+              if resp.status_code == 202:
+                  print(f"✅ Email offboarding envoye a {manager_email}" + (f" + {it_email}" if it_email else ""))
+                  from kestra import Kestra
+                  Kestra.outputs({"email_sent": True, "recipients": [manager_email, it_email]})
+              else:
+                  print(f"⚠️ Email: HTTP {resp.status_code} — {resp.text[:300]}")
+                  from kestra import Kestra
+                  Kestra.outputs({"email_sent": False, "http_status": resp.status_code})
+
+          except Exception as e:
+              print(f"⚠️ Erreur envoi email: {e}")
+              from kestra import Kestra
+              Kestra.outputs({"email_sent": False, "error": str(e)})
 
 # -------------------------------------------------------------------------
 # Gestion timeout / erreur

@@ -37,6 +37,8 @@ inputs:
 
 variables:
   teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+  service_mailbox: "{{ secret('M365_SERVICE_MAILBOX') }}"
+  it_team_email: "{{ secret('M365_IT_TEAM_EMAIL') }}"
 
 tasks:
   # -------------------------------------------------------------------------
@@ -646,6 +648,127 @@ tasks:
           }]
         }]
       }
+
+  # -------------------------------------------------------------------------
+  # 8. Email rapport d'audit a l'equipe IT (Graph API Mail.Send)
+  # -------------------------------------------------------------------------
+  - id: email_audit_report
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+      M365_SERVICE_MAILBOX: "{{ secret('M365_SERVICE_MAILBOX') }}"
+      M365_IT_TEAM_EMAIL: "{{ secret('M365_IT_TEAM_EMAIL') }}"
+    script: |
+      import json
+      import os
+      import requests
+
+      tenant = os.environ.get("AZURE_TENANT_ID", "")
+      client_id = os.environ.get("AZURE_CLIENT_ID", "")
+      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+      service_mailbox = os.environ.get("M365_SERVICE_MAILBOX", "")
+      it_email = os.environ.get("M365_IT_TEAM_EMAIL", "")
+
+      if not all([tenant, client_id, client_secret, service_mailbox, it_email]):
+          print("⚠️ Email non envoye — Entra ID ou boite de service non configurees")
+          from kestra import Kestra
+          Kestra.outputs({"email_sent": False, "reason": "credentials_missing"})
+      else:
+          try:
+              token_resp = requests.post(
+                  f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+                  data={
+                      "client_id": client_id, "client_secret": client_secret,
+                      "scope": "https://graph.microsoft.com/.default",
+                      "grant_type": "client_credentials"
+                  }, timeout=30
+              )
+              token_resp.raise_for_status()
+              access_token = token_resp.json()["access_token"]
+
+              report = json.loads('''{{ outputs.generate_report.vars.report }}''')
+              overall = "{{ outputs.generate_report.vars.overall_status }}"
+              reco_count = {{ outputs.generate_report.vars.recommendations_count }}
+
+              # Construire les recommandations en HTML
+              recos = report.get("recommendations", [])
+              reco_html = "".join(f"<li>{r}</li>" for r in recos)
+
+              # Sections du rapport
+              lic = report.get("sections", {}).get("licenses", {})
+              inact = report.get("sections", {}).get("inactive_users", {})
+              sec = report.get("sections", {}).get("security", {})
+
+              status_color = {"CRITICAL": "#FF0000", "WARNING": "#FFA500", "OK": "#00CC00"}.get(overall, "#0078D4")
+
+              subject = f"[AutomIT] Audit M365 — {overall} ({reco_count} recommandation{'s' if reco_count > 1 else ''})"
+              html_body = f"""
+              <h2 style="color:{status_color};">Rapport Audit Microsoft 365 — {overall}</h2>
+              <p>Audit automatique execute par AutomIT. Mode : {"{{ inputs.mode }}"}.</p>
+
+              <h3>Licences</h3>
+              <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;">
+                <tr><td><b>Total</b></td><td>{lic.get('total_licenses', 'N/A')}</td></tr>
+                <tr><td><b>Utilisees</b></td><td>{lic.get('total_consumed', 'N/A')}</td></tr>
+                <tr><td><b>Disponibles</b></td><td>{lic.get('total_available', 'N/A')}</td></tr>
+                <tr><td><b>Utilisation</b></td><td>{lic.get('global_usage_pct', 'N/A')}%</td></tr>
+              </table>
+
+              <h3>Comptes inactifs</h3>
+              <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;">
+                <tr><td><b>Inactifs</b></td><td>{inact.get('inactive_count', 'N/A')}</td></tr>
+                <tr><td><b>Avec licences</b></td><td>{inact.get('inactive_with_licenses', 'N/A')}</td></tr>
+                <tr><td><b>Jamais connectes</b></td><td>{inact.get('no_signin_count', 'N/A')}</td></tr>
+              </table>
+
+              <h3>Securite</h3>
+              <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;">
+                <tr><td><b>Sans MFA</b></td><td>{sec.get('mfa', {{}}).get('users_without_mfa', 'N/A')}</td></tr>
+                <tr><td><b>Utilisateurs a risque</b></td><td>{sec.get('risky_users', {{}}).get('count', 'N/A')}</td></tr>
+                <tr><td><b>Sign-ins suspects (7j)</b></td><td>{sec.get('risky_signins', {{}}).get('count_7d', 'N/A')}</td></tr>
+              </table>
+
+              <h3>Recommandations ({reco_count})</h3>
+              <ul>{reco_html}</ul>
+
+              <hr>
+              <p style="color:#888;font-size:12px;">
+                AutomIT — Motherson Aerospace IT Automation<br>
+                Execution: {"{{ execution.id }}"}
+              </p>
+              """
+
+              send_url = f"https://graph.microsoft.com/v1.0/users/{service_mailbox}/sendMail"
+              resp = requests.post(send_url, headers={
+                  "Authorization": f"Bearer {access_token}",
+                  "Content-Type": "application/json"
+              }, json={
+                  "message": {
+                      "subject": subject,
+                      "body": {"contentType": "HTML", "content": html_body},
+                      "toRecipients": [{"emailAddress": {"address": it_email}}]
+                  },
+                  "saveToSentItems": "true"
+              }, timeout=30)
+
+              if resp.status_code == 202:
+                  print(f"✅ Rapport audit M365 envoye par email a {it_email}")
+                  from kestra import Kestra
+                  Kestra.outputs({"email_sent": True, "recipient": it_email})
+              else:
+                  print(f"⚠️ Email: HTTP {resp.status_code} — {resp.text[:300]}")
+                  from kestra import Kestra
+                  Kestra.outputs({"email_sent": False, "http_status": resp.status_code})
+
+          except Exception as e:
+              print(f"⚠️ Erreur envoi email: {e}")
+              from kestra import Kestra
+              Kestra.outputs({"email_sent": False, "error": str(e)})
 
 # -------------------------------------------------------------------------
 # Gestion d'erreur

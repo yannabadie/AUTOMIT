@@ -57,6 +57,8 @@ inputs:
 variables:
   teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
   servicenow_url: "{{ secret('SERVICENOW_API_URL') }}"
+  service_mailbox: "{{ secret('M365_SERVICE_MAILBOX') }}"
+  it_team_email: "{{ secret('M365_IT_TEAM_EMAIL') }}"
 
 tasks:
   # -------------------------------------------------------------------------
@@ -193,6 +195,98 @@ tasks:
           ]
         }]
       }
+
+  # -------------------------------------------------------------------------
+  # 6. Email de resolution a l'equipe IT (Graph API Mail.Send)
+  # -------------------------------------------------------------------------
+  - id: email_resolution
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+      M365_SERVICE_MAILBOX: "{{ secret('M365_SERVICE_MAILBOX') }}"
+      M365_IT_TEAM_EMAIL: "{{ secret('M365_IT_TEAM_EMAIL') }}"
+    script: |
+      import json
+      import os
+      import requests
+
+      tenant = os.environ.get("AZURE_TENANT_ID", "")
+      client_id = os.environ.get("AZURE_CLIENT_ID", "")
+      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+      service_mailbox = os.environ.get("M365_SERVICE_MAILBOX", "")
+      it_email = os.environ.get("M365_IT_TEAM_EMAIL", "")
+
+      if not all([tenant, client_id, client_secret, service_mailbox, it_email]):
+          print("⚠️ Email non envoye — Entra ID ou boite de service non configurees")
+          from kestra import Kestra
+          Kestra.outputs({"email_sent": False, "reason": "credentials_missing"})
+      else:
+          try:
+              token_resp = requests.post(
+                  f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+                  data={
+                      "client_id": client_id, "client_secret": client_secret,
+                      "scope": "https://graph.microsoft.com/.default",
+                      "grant_type": "client_credentials"
+                  }, timeout=30
+              )
+              token_resp.raise_for_status()
+              access_token = token_resp.json()["access_token"]
+
+              ticket_id = "{{ outputs.create_ticket.vars.ticket_id }}"
+              severity = "{{ inputs.severity }}"
+              system = "{{ inputs.affected_system }}"
+              summary = "{{ inputs.incident_summary }}"
+
+              severity_colors = {"critical": "#FF0000", "high": "#FFA500", "medium": "#0078D4", "low": "#00CC00"}
+              color = severity_colors.get(severity, "#0078D4")
+
+              subject = f"[AutomIT] Incident resolu — {ticket_id} ({system.upper()})"
+              html_body = f"""
+              <h2 style="color:{color};">Incident resolu — {ticket_id}</h2>
+              <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
+                <tr><td><b>Ticket</b></td><td>{ticket_id}</td></tr>
+                <tr><td><b>Systeme</b></td><td>{system.upper()}</td></tr>
+                <tr><td><b>Severite</b></td><td>{severity.upper()}</td></tr>
+                <tr><td><b>Resume</b></td><td>{summary}</td></tr>
+                <tr><td><b>Resolution</b></td><td>Actions correctives executees apres validation humaine</td></tr>
+                <tr><td><b>Execution</b></td><td>{"{{ execution.id }}"}</td></tr>
+              </table>
+              <hr>
+              <p style="color:#888;font-size:12px;">AutomIT — Motherson Aerospace IT Automation</p>
+              """
+
+              send_url = f"https://graph.microsoft.com/v1.0/users/{service_mailbox}/sendMail"
+              resp = requests.post(send_url, headers={
+                  "Authorization": f"Bearer {access_token}",
+                  "Content-Type": "application/json"
+              }, json={
+                  "message": {
+                      "subject": subject,
+                      "body": {"contentType": "HTML", "content": html_body},
+                      "toRecipients": [{"emailAddress": {"address": it_email}}]
+                  },
+                  "saveToSentItems": "true"
+              }, timeout=30)
+
+              if resp.status_code == 202:
+                  print(f"✅ Email resolution envoye a {it_email}")
+                  from kestra import Kestra
+                  Kestra.outputs({"email_sent": True, "recipient": it_email})
+              else:
+                  print(f"⚠️ Email: HTTP {resp.status_code} — {resp.text[:300]}")
+                  from kestra import Kestra
+                  Kestra.outputs({"email_sent": False, "http_status": resp.status_code})
+
+          except Exception as e:
+              print(f"⚠️ Erreur envoi email: {e}")
+              from kestra import Kestra
+              Kestra.outputs({"email_sent": False, "error": str(e)})
 
 # -------------------------------------------------------------------------
 # Gestion d'erreur et timeout
