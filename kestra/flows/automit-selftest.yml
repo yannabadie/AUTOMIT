@@ -1,0 +1,462 @@
+# =============================================================================
+# FLOW: AutomIT Self-Test — End-to-end connectivity dry-run
+# Triggered by: Schedule (dimanche 22h) + webhook ad-hoc
+# Action: Teste MCP CEGID, MCP Sage X3, Graph API, Pushgateway, ZeroClaw
+# Autonomy Level: Observation (aucune action corrective)
+# =============================================================================
+id: automit-selftest
+namespace: motherson.it.ops
+
+description: |
+  Test de connectivite end-to-end de la plateforme AutomIT.
+  Verifie chaque composant (MCP CEGID, MCP Sage X3, Graph API,
+  Pushgateway, ZeroClaw) et agrege un statut HEALTHY/DEGRADED/CRITICAL.
+  Envoie notification Teams + email recapitulatif.
+  Cron: dimanche 22h. Webhook pour declenchement ad-hoc.
+
+labels:
+  team: it-ops
+  criticality: medium
+  autonomy: observation
+  type: selftest
+
+variables:
+  teams_webhook_url: "{{ secret('TEAMS_WEBHOOK_URL') }}"
+  service_mailbox: "{{ secret('M365_SERVICE_MAILBOX') }}"
+  it_team_email: "{{ secret('M365_IT_TEAM_EMAIL') }}"
+
+tasks:
+  # -------------------------------------------------------------------------
+  # 1. Test MCP connectivity (CEGID + Sage X3)
+  # -------------------------------------------------------------------------
+  - id: test_mcp_connectivity
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
+      CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
+      X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
+      X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
+    script: |
+      import json
+      import os
+      import time
+      from datetime import datetime
+      from lib.mcp_client import mcp_call
+
+      results = {}
+
+      # --- Test CEGID MCP (database_overview) ---
+      cegid_url = os.environ.get("CEGID_MCP_URL", "")
+      cegid_token = os.environ.get("CEGID_MCP_TOKEN", "")
+
+      if not cegid_url or not cegid_token:
+          results["cegid"] = {"status": "SKIP", "reason": "MCP_CEGID_ORACLE_URL or TOKEN not configured"}
+          print(json.dumps({"level": "WARN", "msg": "CEGID MCP skipped — credentials missing"}))
+      else:
+          try:
+              t0 = time.time()
+              resp = mcp_call(cegid_url, cegid_token, "database_overview", {}, timeout=20)
+              elapsed_ms = round((time.time() - t0) * 1000)
+              results["cegid"] = {
+                  "status": "OK",
+                  "response_time_ms": elapsed_ms,
+                  "tool": "database_overview",
+                  "detail": str(resp)[:300]
+              }
+              print(json.dumps({"level": "INFO", "msg": "CEGID MCP OK", "response_time_ms": elapsed_ms}))
+          except Exception as e:
+              elapsed_ms = round((time.time() - t0) * 1000)
+              results["cegid"] = {
+                  "status": "FAIL",
+                  "response_time_ms": elapsed_ms,
+                  "error": str(e)[:300]
+              }
+              print(json.dumps({"level": "ERROR", "msg": "CEGID MCP FAIL", "error": str(e)[:200]}))
+
+      # --- Test Sage X3 MCP (database_overview) ---
+      x3_url = os.environ.get("X3_MCP_URL", "")
+      x3_token = os.environ.get("X3_MCP_TOKEN", "")
+
+      if not x3_url or not x3_token:
+          results["sage_x3"] = {"status": "SKIP", "reason": "X3_MCP_URL or TOKEN not configured"}
+          print(json.dumps({"level": "WARN", "msg": "Sage X3 MCP skipped — credentials missing"}))
+      else:
+          try:
+              t0 = time.time()
+              resp = mcp_call(x3_url, x3_token, "database_overview", {}, timeout=20)
+              elapsed_ms = round((time.time() - t0) * 1000)
+              results["sage_x3"] = {
+                  "status": "OK",
+                  "response_time_ms": elapsed_ms,
+                  "tool": "database_overview",
+                  "detail": str(resp)[:300]
+              }
+              print(json.dumps({"level": "INFO", "msg": "Sage X3 MCP OK", "response_time_ms": elapsed_ms}))
+          except Exception as e:
+              elapsed_ms = round((time.time() - t0) * 1000)
+              results["sage_x3"] = {
+                  "status": "FAIL",
+                  "response_time_ms": elapsed_ms,
+                  "error": str(e)[:300]
+              }
+              print(json.dumps({"level": "ERROR", "msg": "Sage X3 MCP FAIL", "error": str(e)[:200]}))
+
+      from kestra import Kestra
+      Kestra.outputs({"mcp_results": json.dumps(results)})
+      print(json.dumps({"level": "INFO", "msg": "MCP connectivity test complete", "results": results}))
+
+  # -------------------------------------------------------------------------
+  # 2. Test Graph API (auth + read /v1.0/organization)
+  # -------------------------------------------------------------------------
+  - id: test_graph_api
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+    script: |
+      import json
+      import os
+      import time
+      import requests
+      from lib.mcp_client import get_graph_token
+
+      tenant = os.environ.get("AZURE_TENANT_ID", "")
+      client_id = os.environ.get("AZURE_CLIENT_ID", "")
+      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+
+      if not all([tenant, client_id, client_secret]):
+          result = {"status": "SKIP", "reason": "AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET not configured"}
+          print(json.dumps({"level": "WARN", "msg": "Graph API skipped — Entra ID credentials missing"}))
+      else:
+          try:
+              # Step 1: Get token
+              t0 = time.time()
+              access_token = get_graph_token(tenant, client_id, client_secret)
+              token_ms = round((time.time() - t0) * 1000)
+
+              # Step 2: Call /v1.0/organization
+              t1 = time.time()
+              resp = requests.get(
+                  "https://graph.microsoft.com/v1.0/organization",
+                  headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                  timeout=15
+              )
+              api_ms = round((time.time() - t1) * 1000)
+
+              if resp.status_code == 200:
+                  org_data = resp.json().get("value", [])
+                  org_name = org_data[0].get("displayName", "unknown") if org_data else "unknown"
+                  result = {
+                      "status": "OK",
+                      "token_time_ms": token_ms,
+                      "api_time_ms": api_ms,
+                      "organization": org_name
+                  }
+                  print(json.dumps({"level": "INFO", "msg": "Graph API OK", "org": org_name, "token_ms": token_ms, "api_ms": api_ms}))
+              else:
+                  result = {
+                      "status": "FAIL",
+                      "token_time_ms": token_ms,
+                      "api_time_ms": api_ms,
+                      "http_status": resp.status_code,
+                      "error": resp.text[:300]
+                  }
+                  print(json.dumps({"level": "ERROR", "msg": "Graph API FAIL", "http_status": resp.status_code}))
+
+          except Exception as e:
+              result = {"status": "FAIL", "error": str(e)[:300]}
+              print(json.dumps({"level": "ERROR", "msg": "Graph API FAIL", "error": str(e)[:200]}))
+
+      from kestra import Kestra
+      Kestra.outputs({"graph_result": json.dumps(result)})
+
+  # -------------------------------------------------------------------------
+  # 3. Test Pushgateway readiness
+  # -------------------------------------------------------------------------
+  - id: test_pushgateway
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      import time
+      import requests
+
+      try:
+          t0 = time.time()
+          resp = requests.get("http://pushgateway:9091/-/ready", timeout=10)
+          elapsed_ms = round((time.time() - t0) * 1000)
+
+          if resp.status_code == 200:
+              result = {"status": "OK", "response_time_ms": elapsed_ms}
+              print(json.dumps({"level": "INFO", "msg": "Pushgateway OK", "response_time_ms": elapsed_ms}))
+          else:
+              result = {"status": "FAIL", "response_time_ms": elapsed_ms, "http_status": resp.status_code}
+              print(json.dumps({"level": "ERROR", "msg": "Pushgateway FAIL", "http_status": resp.status_code}))
+      except Exception as e:
+          elapsed_ms = round((time.time() - t0) * 1000) if 't0' in dir() else 0
+          result = {"status": "DOWN", "error": str(e)[:300]}
+          print(json.dumps({"level": "ERROR", "msg": "Pushgateway DOWN", "error": str(e)[:200]}))
+
+      from kestra import Kestra
+      Kestra.outputs({"pushgateway_result": json.dumps(result)})
+
+  # -------------------------------------------------------------------------
+  # 4. Test ZeroClaw gateway health
+  # -------------------------------------------------------------------------
+  - id: test_zeroclaw
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    script: |
+      import json
+      import time
+      import requests
+
+      try:
+          t0 = time.time()
+          resp = requests.get("http://zeroclaw-erp-agent:42617/health", timeout=10)
+          elapsed_ms = round((time.time() - t0) * 1000)
+
+          if resp.status_code == 200:
+              body = {}
+              try:
+                  body = resp.json()
+              except Exception:
+                  body = {"raw": resp.text[:300]}
+              result = {"status": "OK", "response_time_ms": elapsed_ms, "detail": body}
+              print(json.dumps({"level": "INFO", "msg": "ZeroClaw OK", "response_time_ms": elapsed_ms}))
+          else:
+              result = {"status": "FAIL", "response_time_ms": elapsed_ms, "http_status": resp.status_code}
+              print(json.dumps({"level": "ERROR", "msg": "ZeroClaw FAIL", "http_status": resp.status_code}))
+      except Exception as e:
+          elapsed_ms = round((time.time() - t0) * 1000) if 't0' in dir() else 0
+          result = {"status": "DOWN", "error": str(e)[:300]}
+          print(json.dumps({"level": "ERROR", "msg": "ZeroClaw DOWN", "error": str(e)[:200]}))
+
+      from kestra import Kestra
+      Kestra.outputs({"zeroclaw_result": json.dumps(result)})
+
+  # -------------------------------------------------------------------------
+  # 5. Aggregate results + send email
+  # -------------------------------------------------------------------------
+  - id: aggregate_and_notify
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      containerImage: automit/python-erp:3.12
+    env:
+      AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
+      AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
+      AZURE_CLIENT_SECRET: "{{ secret('AZURE_CLIENT_SECRET') }}"
+      M365_SERVICE_MAILBOX: "{{ secret('M365_SERVICE_MAILBOX') }}"
+      M365_IT_TEAM_EMAIL: "{{ secret('M365_IT_TEAM_EMAIL') }}"
+    script: |
+      import json
+      import os
+      from datetime import datetime
+      from lib.mcp_client import get_graph_token, send_graph_email
+
+      # --- Collect all results ---
+      mcp = json.loads('''{{ outputs.test_mcp_connectivity.vars.mcp_results }}''')
+      graph = json.loads('''{{ outputs.test_graph_api.vars.graph_result }}''')
+      pushgw = json.loads('''{{ outputs.test_pushgateway.vars.pushgateway_result }}''')
+      zeroclaw = json.loads('''{{ outputs.test_zeroclaw.vars.zeroclaw_result }}''')
+
+      components = {
+          "mcp_cegid": mcp.get("cegid", {}),
+          "mcp_sage_x3": mcp.get("sage_x3", {}),
+          "graph_api": graph,
+          "pushgateway": pushgw,
+          "zeroclaw": zeroclaw
+      }
+
+      # --- Categorize ---
+      ok_list = []
+      fail_list = []
+      skip_list = []
+
+      for name, result in components.items():
+          status = result.get("status", "FAIL")
+          if status == "OK":
+              ok_list.append(name)
+          elif status == "SKIP":
+              skip_list.append(name)
+          else:
+              fail_list.append(name)
+
+      # --- Overall status ---
+      total = len(components)
+      ok_count = len(ok_list)
+      fail_count = len(fail_list)
+      skip_count = len(skip_list)
+
+      if fail_count == 0:
+          overall = "HEALTHY"
+      elif fail_count <= 2:
+          overall = "DEGRADED"
+      else:
+          overall = "CRITICAL"
+
+      report = {
+          "timestamp": datetime.utcnow().isoformat() + "Z",
+          "execution_id": "{{ execution.id }}",
+          "overall": overall,
+          "total": total,
+          "ok": ok_count,
+          "fail": fail_count,
+          "skip": skip_count,
+          "ok_list": ok_list,
+          "fail_list": fail_list,
+          "skip_list": skip_list,
+          "components": components
+      }
+
+      print(json.dumps({"level": "INFO", "msg": f"Self-test complete: {overall}", "ok": ok_count, "fail": fail_count, "skip": skip_count}))
+      print(json.dumps(report, indent=2))
+
+      # --- Send email if Graph API credentials available ---
+      tenant = os.environ.get("AZURE_TENANT_ID", "")
+      client_id = os.environ.get("AZURE_CLIENT_ID", "")
+      client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+      service_mailbox = os.environ.get("M365_SERVICE_MAILBOX", "")
+      it_email = os.environ.get("M365_IT_TEAM_EMAIL", "")
+
+      email_sent = False
+      if all([tenant, client_id, client_secret, service_mailbox, it_email]):
+          try:
+              access_token = get_graph_token(tenant, client_id, client_secret)
+
+              status_color = {"HEALTHY": "#00CC00", "DEGRADED": "#FFA500", "CRITICAL": "#FF0000"}.get(overall, "#0078D4")
+              status_emoji = {"HEALTHY": "OK", "DEGRADED": "DEGRADED", "CRITICAL": "CRITICAL"}.get(overall, overall)
+
+              # Build component rows
+              rows_html = ""
+              for name, result in components.items():
+                  s = result.get("status", "FAIL")
+                  rt = result.get("response_time_ms", result.get("token_time_ms", "N/A"))
+                  color = "#00CC00" if s == "OK" else ("#FFA500" if s == "SKIP" else "#FF0000")
+                  detail = result.get("error", result.get("reason", result.get("organization", "")))
+                  if detail:
+                      detail = str(detail)[:80]
+                  rows_html += f'<tr><td>{name}</td><td style="color:{color};font-weight:bold;">{s}</td><td>{rt}</td><td>{detail}</td></tr>'
+
+              subject = f"[AutomIT] Self-test {status_emoji} — {ok_count}/{total} OK"
+              html_body = f"""
+              <h2 style="color:{status_color};">AutomIT Self-Test — {overall}</h2>
+              <p>Test de connectivite end-to-end execute le {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}.</p>
+
+              <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;">
+                <tr style="background:#f0f0f0;">
+                  <th>Composant</th><th>Statut</th><th>Temps (ms)</th><th>Detail</th>
+                </tr>
+                {rows_html}
+              </table>
+
+              <p><b>Resume :</b> {ok_count} OK, {fail_count} FAIL, {skip_count} SKIP sur {total} composants.</p>
+
+              <hr>
+              <p style="color:#888;font-size:12px;">
+                AutomIT — Motherson Aerospace IT Automation<br>
+                Execution: {"{{ execution.id }}"}
+              </p>
+              """
+
+              email_sent = send_graph_email(access_token, service_mailbox, subject, html_body, [it_email])
+              if email_sent:
+                  print(json.dumps({"level": "INFO", "msg": f"Self-test email sent to {it_email}"}))
+              else:
+                  print(json.dumps({"level": "WARN", "msg": "Email send returned non-202"}))
+
+          except Exception as e:
+              print(json.dumps({"level": "WARN", "msg": f"Email send failed: {e}"}))
+      else:
+          print(json.dumps({"level": "WARN", "msg": "Email skipped — Entra ID or mailbox credentials missing"}))
+
+      from kestra import Kestra
+      Kestra.outputs({
+          "overall": overall,
+          "ok": ok_count,
+          "fail": fail_count,
+          "skip": skip_count,
+          "email_sent": email_sent,
+          "report": json.dumps(report)
+      })
+
+  # -------------------------------------------------------------------------
+  # 6. Notification Teams — MessageCard avec statut
+  # -------------------------------------------------------------------------
+  - id: notify_teams
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "{{ outputs.aggregate_and_notify.vars.overall == 'CRITICAL' ? 'FF0000' : outputs.aggregate_and_notify.vars.overall == 'DEGRADED' ? 'FFA500' : '00CC00' }}",
+        "summary": "Self-test AutomIT — {{ outputs.aggregate_and_notify.vars.overall }}",
+        "sections": [{
+          "activityTitle": "Self-test AutomIT — {{ outputs.aggregate_and_notify.vars.overall }}",
+          "activitySubtitle": "{{ execution.id }}",
+          "facts": [
+            {"name": "Statut global", "value": "{{ outputs.aggregate_and_notify.vars.overall }}"},
+            {"name": "OK", "value": "{{ outputs.aggregate_and_notify.vars.ok }}"},
+            {"name": "FAIL", "value": "{{ outputs.aggregate_and_notify.vars.fail }}"},
+            {"name": "SKIP", "value": "{{ outputs.aggregate_and_notify.vars.skip }}"},
+            {"name": "Email envoye", "value": "{{ outputs.aggregate_and_notify.vars.email_sent }}"},
+            {"name": "Execution", "value": "{{ execution.id }}"}
+          ]
+        }],
+        "potentialAction": [{
+          "@type": "OpenUri",
+          "name": "Details dans Kestra",
+          "targets": [{
+            "os": "default",
+            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+          }]
+        }]
+      }
+
+# -------------------------------------------------------------------------
+# Gestion d'erreur
+# -------------------------------------------------------------------------
+errors:
+  - id: on_error
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ vars.teams_webhook_url }}"
+    method: POST
+    contentType: application/json
+    body: |
+      {
+        "@type": "MessageCard",
+        "themeColor": "FF0000",
+        "summary": "Erreur self-test AutomIT",
+        "sections": [{
+          "activityTitle": "Echec self-test AutomIT",
+          "facts": [
+            {"name": "Execution", "value": "{{ execution.id }}"},
+            {"name": "Action", "value": "Verifier les logs Kestra"}
+          ]
+        }]
+      }
+
+triggers:
+  # Dimanche 22h — self-test hebdomadaire
+  - id: weekly_selftest
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 22 * * 0"
+
+  # Webhook pour declenchement ad-hoc
+  - id: adhoc_selftest
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: "{{ secret('WEBHOOK_KEY_SELFTEST') }}"
