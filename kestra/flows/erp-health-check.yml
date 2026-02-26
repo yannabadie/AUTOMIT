@@ -18,6 +18,12 @@ labels:
   autonomy: observation
   erp: cegid-sage
 
+sla:
+  - id: max_execution_time
+    type: MAX_DURATION
+    duration: PT5M
+    behavior: CANCEL
+
 tasks:
   # -------------------------------------------------------------------------
   # 1. Check CEGID XRP Sprint (via MCP cegid-oracle)

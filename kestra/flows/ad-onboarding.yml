@@ -19,6 +19,12 @@ labels:
   autonomy: L2
   compliance: EN9100
 
+sla:
+  - id: max_execution_time
+    type: MAX_DURATION
+    duration: PT72H
+    behavior: CANCEL
+
 inputs:
   - id: action_type
     type: STRING

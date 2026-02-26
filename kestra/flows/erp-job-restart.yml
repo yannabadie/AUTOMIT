@@ -18,6 +18,12 @@ labels:
   autonomy: L1
   erp: cegid-sage
 
+sla:
+  - id: max_execution_time
+    type: MAX_DURATION
+    duration: PT10M
+    behavior: CANCEL
+
 inputs:
   - id: erp_system
     type: STRING
