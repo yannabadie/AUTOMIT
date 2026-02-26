@@ -29,4 +29,8 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.
 # Verify ODBC driver installed
 RUN python -c "import pyodbc; print('Drivers:', pyodbc.drivers())"
 
+# Install shared AutomIT library
+COPY scripts/lib /opt/automit/lib
+ENV PYTHONPATH="/opt/automit:${PYTHONPATH}"
+
 WORKDIR /app

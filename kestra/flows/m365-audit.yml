@@ -58,6 +58,7 @@ tasks:
       import os
       import sys
       import requests
+      from lib.mcp_client import get_graph_token
 
       tenant = os.environ.get("AZURE_TENANT_ID", "")
       client_id = os.environ.get("AZURE_CLIENT_ID", "")
@@ -71,17 +72,8 @@ tasks:
           sys.exit(1)
 
       try:
-          token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-          resp = requests.post(token_url, data={
-              "client_id": client_id,
-              "client_secret": client_secret,
-              "scope": "https://graph.microsoft.com/.default",
-              "grant_type": "client_credentials"
-          }, timeout=30)
-          resp.raise_for_status()
-          token = resp.json()["access_token"]
-          expires_in = resp.json().get("expires_in", 3600)
-          print(f"✅ Token Graph API obtenu (expire dans {expires_in}s)")
+          token = get_graph_token(tenant, client_id, client_secret)
+          print("✅ Token Graph API obtenu")
 
           from kestra import Kestra
           Kestra.outputs({"authenticated": True, "token": token})
@@ -563,23 +555,13 @@ tasks:
           import json
           import os
           import requests
+          from lib.mcp_client import get_graph_token
 
           report = json.loads('''{{ outputs.generate_report.vars.report }}''')
           print("✅ Validation humaine recue — traitement des recommandations")
 
           # Obtenir un fresh token
-          tenant = os.environ["AZURE_TENANT_ID"]
-          resp = requests.post(
-              f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
-              data={
-                  "client_id": os.environ["AZURE_CLIENT_ID"],
-                  "client_secret": os.environ["AZURE_CLIENT_SECRET"],
-                  "scope": "https://graph.microsoft.com/.default",
-                  "grant_type": "client_credentials"
-              }, timeout=30
-          )
-          resp.raise_for_status()
-          token = resp.json()["access_token"]
+          token = get_graph_token(os.environ["AZURE_TENANT_ID"], os.environ["AZURE_CLIENT_ID"], os.environ["AZURE_CLIENT_SECRET"])
           headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
           actions_taken = []
@@ -680,16 +662,8 @@ tasks:
           Kestra.outputs({"email_sent": False, "reason": "credentials_missing"})
       else:
           try:
-              token_resp = requests.post(
-                  f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
-                  data={
-                      "client_id": client_id, "client_secret": client_secret,
-                      "scope": "https://graph.microsoft.com/.default",
-                      "grant_type": "client_credentials"
-                  }, timeout=30
-              )
-              token_resp.raise_for_status()
-              access_token = token_resp.json()["access_token"]
+              from lib.mcp_client import get_graph_token
+              access_token = get_graph_token(tenant, client_id, client_secret)
 
               report = json.loads('''{{ outputs.generate_report.vars.report }}''')
               overall = "{{ outputs.generate_report.vars.overall_status }}"

@@ -385,6 +385,7 @@ tasks:
       import json
       import os
       import requests
+      from lib.mcp_client import get_graph_token
 
       sam = "{{ inputs.sam_account }}"
       upn = f"{sam}@adigroupe.onmicrosoft.com"
@@ -402,15 +403,7 @@ tasks:
       else:
           try:
               # Token Graph API
-              token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-              token_resp = requests.post(token_url, data={
-                  "client_id": client_id,
-                  "client_secret": client_secret,
-                  "scope": "https://graph.microsoft.com/.default",
-                  "grant_type": "client_credentials"
-              }, timeout=30)
-              token_resp.raise_for_status()
-              access_token = token_resp.json()["access_token"]
+              access_token = get_graph_token(tenant, client_id, client_secret)
               headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
               # Desactiver le sign-in M365
@@ -475,26 +468,11 @@ tasks:
           import json
           import os
           import requests
+          from lib.mcp_client import mcp_call
 
           sam = "{{ inputs.sam_account }}"
           erp_access = "{{ inputs.erp_access ?? 'auto' }}"
           result = {"erp_revoked": [], "errors": []}
-
-          def mcp_call(mcp_url, mcp_token, tool_name, arguments):
-              headers = {
-                  "X-MCP-TOKEN": mcp_token,
-                  "Content-Type": "application/json",
-                  "Accept": "application/json"
-              }
-              payload = {
-                  "jsonrpc": "2.0", "id": 1,
-                  "method": "tools/call",
-                  "params": {"name": tool_name, "arguments": arguments}
-              }
-              resp = requests.post(mcp_url, json=payload, headers=headers, timeout=30)
-              if resp.status_code == 200:
-                  return resp.json().get("result", resp.json())
-              raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
 
           # --- CEGID ---
           if erp_access in ("auto", "cegid", "both"):
@@ -595,6 +573,7 @@ tasks:
       import json
       import os
       import requests
+      from lib.mcp_client import get_graph_token
 
       tenant = os.environ.get("AZURE_TENANT_ID", "")
       client_id = os.environ.get("AZURE_CLIENT_ID", "")
@@ -607,16 +586,7 @@ tasks:
           Kestra.outputs({"email_sent": False, "reason": "credentials_missing"})
       else:
           try:
-              token_resp = requests.post(
-                  f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
-                  data={
-                      "client_id": client_id, "client_secret": client_secret,
-                      "scope": "https://graph.microsoft.com/.default",
-                      "grant_type": "client_credentials"
-                  }, timeout=30
-              )
-              token_resp.raise_for_status()
-              access_token = token_resp.json()["access_token"]
+              access_token = get_graph_token(tenant, client_id, client_secret)
 
               sam = "{{ inputs.sam_account }}"
               ticket_id = "{{ outputs.prepare_offboarding_plan.vars.ticket_id }}"

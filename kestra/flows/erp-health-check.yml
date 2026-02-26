@@ -37,14 +37,10 @@ tasks:
       import time
       import requests
       from datetime import datetime
+      from lib.mcp_client import mcp_call, mcp_query
 
       mcp_url = os.environ["CEGID_MCP_URL"]
       mcp_token = os.environ["CEGID_MCP_TOKEN"]
-      headers = {
-          "X-MCP-TOKEN": mcp_token,
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-      }
 
       checks = {
           "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -53,30 +49,11 @@ tasks:
           "overall_status": "HEALTHY"
       }
 
-      def mcp_call(tool_name, arguments):
-          """Call a CEGID Oracle MCP tool via JSON-RPC."""
-          payload = {
-              "jsonrpc": "2.0", "id": 1,
-              "method": "tools/call",
-              "params": {"name": tool_name, "arguments": arguments}
-          }
-          resp = requests.post(mcp_url, json=payload, headers=headers, timeout=30)
-          if resp.status_code == 200:
-              data = resp.json()
-              if "error" in data:
-                  raise Exception(f"MCP error: {data['error']}")
-              return data.get("result", data)
-          raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
-
-      def mcp_query(sql):
-          """Execute a read-only SQL query via MCP query_database tool."""
-          result = mcp_call("query_database", {"sql": sql, "limit": 100})
-          return result
-
       # --- Test connexion MCP ---
       try:
           t0 = time.time()
-          resp = requests.get(mcp_url.rstrip("/"), headers=headers, timeout=15)
+          mcp_headers = {"X-MCP-TOKEN": mcp_token, "Content-Type": "application/json", "Accept": "application/json"}
+          resp = requests.get(mcp_url.rstrip("/"), headers=mcp_headers, timeout=15)
           response_ms = round((time.time() - t0) * 1000)
           checks["checks"]["mcp_connection"] = {
               "status": "OK" if resp.status_code < 500 else "CRITICAL",
@@ -89,7 +66,7 @@ tasks:
       # --- Sessions actives ---
       if checks["checks"].get("mcp_connection", {}).get("status") == "OK":
           try:
-              result = mcp_query(
+              result = mcp_query(mcp_url, mcp_token,
                   "SELECT COUNT(*) AS cnt FROM sys.dm_exec_sessions WHERE is_user_process = 1"
               )
               # Parse result — MCP returns content array with text
@@ -116,7 +93,7 @@ tasks:
       # --- Jobs batch ---
       if checks["checks"].get("mcp_connection", {}).get("status") == "OK":
           try:
-              result = mcp_query("""
+              result = mcp_query(mcp_url, mcp_token, """
                   SELECT
                       (SELECT COUNT(*) FROM msdb.dbo.sysjobactivity ja
                        JOIN msdb.dbo.sysjobs j ON ja.job_id = j.job_id
@@ -156,7 +133,7 @@ tasks:
       # --- Fraicheur des donnees (via MCP analyze_data_freshness) ---
       if checks["checks"].get("mcp_connection", {}).get("status") == "OK":
           try:
-              result = mcp_call("analyze_data_freshness", {"domain": "production"})
+              result = mcp_call(mcp_url, mcp_token, "analyze_data_freshness", {"domain": "production"})
               checks["checks"]["data_freshness"] = {"status": "OK", "detail": str(result)[:500]}
           except Exception as e:
               checks["checks"]["data_freshness"] = {"status": "WARNING", "error": str(e)}
@@ -164,7 +141,7 @@ tasks:
       # --- Derniere sauvegarde ---
       if checks["checks"].get("mcp_connection", {}).get("status") == "OK":
           try:
-              result = mcp_query("""
+              result = mcp_query(mcp_url, mcp_token, """
                   SELECT TOP 1 backup_finish_date, type, backup_size / 1048576 AS size_mb
                   FROM msdb.dbo.backupset
                   WHERE database_name = 'Y2_MSC_MAROC'
@@ -314,6 +291,7 @@ tasks:
       import os
       import requests
       from datetime import datetime
+      from lib.mcp_client import get_graph_token
 
       checks = {
           "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -333,15 +311,7 @@ tasks:
       else:
           # --- Obtenir un token Graph API ---
           try:
-              token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-              token_resp = requests.post(token_url, data={
-                  "client_id": client_id,
-                  "client_secret": client_secret,
-                  "scope": "https://graph.microsoft.com/.default",
-                  "grant_type": "client_credentials"
-              }, timeout=30)
-              token_resp.raise_for_status()
-              access_token = token_resp.json()["access_token"]
+              access_token = get_graph_token(tenant, client_id, client_secret)
               headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
               checks["checks"]["auth"] = {"status": "OK", "detail": "Token Graph API obtenu"}
           except Exception as e:
