@@ -30,6 +30,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     env:
       VSPHERE_HOST: "{{ secret('VSPHERE_HOST') }}"
       VSPHERE_USER: "{{ secret('VSPHERE_USER') }}"
@@ -232,6 +233,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     script: |
       import json
       import os

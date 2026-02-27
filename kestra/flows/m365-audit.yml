@@ -69,6 +69,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     script: |
       import json
       import requests
@@ -153,6 +154,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     script: |
       import json
       import requests
@@ -256,6 +258,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     script: |
       import json
       import requests
@@ -415,6 +418,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     script: |
       import json
       from datetime import datetime
@@ -525,6 +529,7 @@ tasks:
         taskRunner:
           type: io.kestra.plugin.scripts.runner.docker.Docker
           image: automit/python-erp:3.12
+          networkMode: automit_motherson-net
         env:
           AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
           AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
@@ -617,6 +622,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     env:
       AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
       AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"

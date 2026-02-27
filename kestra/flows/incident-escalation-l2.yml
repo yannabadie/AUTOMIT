@@ -69,6 +69,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     script: |
       import json
       import hashlib
@@ -157,6 +158,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     script: |
       import json
       print("✅ Validation humaine reçue — exécution des actions correctives")
@@ -204,6 +206,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     env:
       AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
       AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"

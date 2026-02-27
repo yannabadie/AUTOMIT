@@ -22,6 +22,7 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
+      networkMode: automit_motherson-net
     script: |
       import json
       import requests
