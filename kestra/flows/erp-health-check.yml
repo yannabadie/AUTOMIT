@@ -33,7 +33,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
       CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
@@ -182,7 +182,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
       X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
@@ -287,7 +287,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
       AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
@@ -485,7 +485,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       import os
@@ -606,31 +606,30 @@ tasks:
       Kestra.outputs({"global_status": report["global_status"]})
 
   # -------------------------------------------------------------------------
-  # Store health state in KV for cross-execution correlation
+  # TODO: Store health state in KV (requires io.kestra.plugin.kv plugin)
+  # Uncomment when plugin is installed:
+  # - id: update_kv_state
+  #   type: io.kestra.plugin.core.flow.Sequential
+  #   tasks:
+  #     - id: set_last_check
+  #       type: io.kestra.plugin.kv.Set
+  #       key: erp_last_health_check
+  #       value: "{{ outputs.aggregate_and_forward.vars.report_json }}"
+  #       namespace: motherson.it.erp
+  #       overwrite: true
+  #     - id: set_cegid_status
+  #       type: io.kestra.plugin.kv.Set
+  #       key: erp_cegid_status
+  #       value: "{{ outputs.check_cegid.vars.status }}"
+  #       namespace: motherson.it.erp
+  #       overwrite: true
+  #     - id: set_check_timestamp
+  #       type: io.kestra.plugin.kv.Set
+  #       key: erp_last_check_ts
+  #       value: "{{ now() }}"
+  #       namespace: motherson.it.erp
+  #       overwrite: true
   # -------------------------------------------------------------------------
-  - id: update_kv_state
-    type: io.kestra.plugin.core.flow.Sequential
-    tasks:
-      - id: set_last_check
-        type: io.kestra.plugin.kv.Set
-        key: erp_last_health_check
-        value: "{{ outputs.aggregate_and_forward.vars.report_json }}"
-        namespace: motherson.it.erp
-        overwrite: true
-
-      - id: set_cegid_status
-        type: io.kestra.plugin.kv.Set
-        key: erp_cegid_status
-        value: "{{ outputs.check_cegid.vars.status }}"
-        namespace: motherson.it.erp
-        overwrite: true
-
-      - id: set_check_timestamp
-        type: io.kestra.plugin.kv.Set
-        key: erp_last_check_ts
-        value: "{{ now() }}"
-        namespace: motherson.it.erp
-        overwrite: true
 
 triggers:
   # Surveillance périodique toutes les 5 minutes

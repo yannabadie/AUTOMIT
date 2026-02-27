@@ -27,9 +27,9 @@ sla:
 
 inputs:
   - id: mode
-    type: STRING
+    type: SELECT
     defaults: "audit_only"
-    allowedValues: [audit_only, audit_and_remediate]
+    values: [audit_only, audit_and_remediate]
     description: "audit_only = rapport seul | audit_and_remediate = rapport + actions (L2)"
 
   - id: inactive_days_threshold
@@ -68,7 +68,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       import requests
@@ -152,7 +152,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       import requests
@@ -255,7 +255,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       import requests
@@ -414,7 +414,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       from datetime import datetime
@@ -524,7 +524,7 @@ tasks:
         type: io.kestra.plugin.scripts.python.Script
         taskRunner:
           type: io.kestra.plugin.scripts.runner.docker.Docker
-          containerImage: automit/python-erp:3.12
+          image: automit/python-erp:3.12
         env:
           AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
           AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
@@ -616,7 +616,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
       AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"

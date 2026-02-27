@@ -20,9 +20,9 @@ labels:
 
 inputs:
   - id: mode
-    type: STRING
+    type: SELECT
     defaults: "audit_only"
-    allowedValues: [audit_only, audit_and_remediate]
+    values: [audit_only, audit_and_remediate]
     description: "audit_only = rapport seul | audit_and_remediate = rapport + actions (L2)"
 
   - id: inactive_days_threshold
@@ -38,7 +38,7 @@ tasks:
     type: io.kestra.plugin.scripts.shell.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: mcr.microsoft.com/powershell:latest
+      image: mcr.microsoft.com/powershell:latest
     script: |
       #!/usr/bin/env pwsh
 
@@ -82,7 +82,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       from datetime import datetime
@@ -128,7 +128,7 @@ tasks:
         type: io.kestra.plugin.scripts.shell.Script
         taskRunner:
           type: io.kestra.plugin.scripts.runner.docker.Docker
-          containerImage: mcr.microsoft.com/powershell:latest
+          image: mcr.microsoft.com/powershell:latest
         script: |
           #!/usr/bin/env pwsh
           Write-Host "🔧 Exécution des actions correctives AD..."

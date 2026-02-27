@@ -26,11 +26,11 @@ sla:
 
 inputs:
   - id: erp_system
-    type: STRING
+    type: SELECT
     required: true
     defaults: "cegid"
     description: "ERP cible: cegid | sage_x3"
-    allowedValues:
+    values:
       - cegid
       - sage_x3
 
@@ -41,7 +41,7 @@ inputs:
 
   - id: failure_count
     type: INT
-    required: false
+    required: true
     defaults: 1
     description: "Nombre d'échecs consécutifs détectés par l'agent"
 
@@ -62,36 +62,11 @@ variables:
 
 tasks:
   # -------------------------------------------------------------------------
-  # Anti-storm: check if a restart was done recently (10min cooldown)
+  # TODO: Anti-storm cooldown (requires io.kestra.plugin.kv plugin)
+  # Uncomment when plugin is installed
+  # - id: check_restart_cooldown
+  #   ...
   # -------------------------------------------------------------------------
-  - id: check_restart_cooldown
-    type: io.kestra.plugin.scripts.python.Script
-    taskRunner:
-      type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
-    script: |
-      from datetime import datetime, timezone, timedelta
-      from lib.logging import log_info, log_warn
-
-      last_restart = "{{ kv('erp_last_restart_ts', namespace='motherson.it.erp', errorOnMissing=false) }}"
-
-      if last_restart and last_restart not in ("null", ""):
-          try:
-              last_dt = datetime.fromisoformat(last_restart.replace("Z", "+00:00"))
-              now = datetime.now(timezone.utc)
-              cooldown = timedelta(minutes=10)
-              if now - last_dt < cooldown:
-                  remaining = cooldown - (now - last_dt)
-                  log_warn("Restart cooldown active", last_restart=last_restart, remaining_s=remaining.total_seconds())
-                  from kestra import Kestra
-                  Kestra.outputs({"cooldown_active": True, "can_restart": False})
-                  import sys; sys.exit(0)
-          except Exception:
-              pass
-
-      log_info("No cooldown — restart allowed")
-      from kestra import Kestra
-      Kestra.outputs({"cooldown_active": False, "can_restart": True})
 
   # -------------------------------------------------------------------------
   # 1. Log l'intervention de l'agent
@@ -113,7 +88,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
       CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
@@ -218,7 +193,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
       CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
@@ -271,9 +246,9 @@ tasks:
       from kestra import Kestra
       Kestra.outputs(result)
     retry:
-      maxAttempt: "{{ vars.max_retries }}"
+      maxAttempt: 3
       type: constant
-      interval: PT{{ vars.retry_delay_seconds }}S
+      interval: PT30S
 
   # -------------------------------------------------------------------------
   # 4. Vérifier le résultat post-restart
@@ -282,7 +257,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
       CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
@@ -371,14 +346,14 @@ tasks:
       }
 
   # -------------------------------------------------------------------------
-  # Record restart timestamp for cooldown tracking
+  # TODO: Record restart timestamp (requires io.kestra.plugin.kv plugin)
+  # - id: set_restart_timestamp
+  #   type: io.kestra.plugin.kv.Set
+  #   key: erp_last_restart_ts
+  #   value: "{{ now() }}"
+  #   namespace: motherson.it.erp
+  #   overwrite: true
   # -------------------------------------------------------------------------
-  - id: set_restart_timestamp
-    type: io.kestra.plugin.kv.Set
-    key: erp_last_restart_ts
-    value: "{{ now() }}"
-    namespace: motherson.it.erp
-    overwrite: true
 
 # ---------------------------------------------------------------------------
 # TRIGGERS

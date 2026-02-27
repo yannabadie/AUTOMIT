@@ -26,10 +26,10 @@ sla:
 
 inputs:
   - id: action_type
-    type: STRING
+    type: SELECT
     required: true
     defaults: "offboarding"
-    allowedValues: [offboarding]
+    values: [offboarding]
 
   - id: sam_account
     type: STRING
@@ -42,10 +42,10 @@ inputs:
     description: "Date de depart effective (YYYY-MM-DD)"
 
   - id: departure_reason
-    type: STRING
+    type: SELECT
     required: true
     defaults: "depart_volontaire"
-    allowedValues: [depart_volontaire, fin_contrat, licenciement, fin_mission, retraite, mutation]
+    values: [depart_volontaire, fin_contrat, licenciement, fin_mission, retraite, mutation]
 
   - id: manager_email
     type: STRING
@@ -59,21 +59,21 @@ inputs:
 
   - id: immediate_disable
     type: BOOLEAN
-    required: false
+    required: true
     defaults: false
     description: "Desactivation immediate (true pour licenciement/securite)"
 
   - id: archive_mailbox
     type: BOOLEAN
-    required: false
+    required: true
     defaults: true
     description: "Archiver la boite mail avant desactivation (retention 30j)"
 
   - id: erp_access
-    type: STRING
-    required: false
+    type: SELECT
+    required: true
     defaults: "auto"
-    allowedValues: [auto, cegid, sage_x3, both, none]
+    values: [auto, cegid, sage_x3, both, none]
     description: "Acces ERP a revoquer (auto = detecter depuis l'AD)"
 
   - id: correlation_id
@@ -93,7 +93,7 @@ tasks:
     type: io.kestra.plugin.scripts.shell.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: mcr.microsoft.com/powershell:latest
+      image: mcr.microsoft.com/powershell:latest
     env:
       AD_DOMAIN: "{{ secret('AD_DOMAIN') }}"
       AD_DC: "{{ secret('AD_DC') }}"
@@ -171,7 +171,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       import hashlib
@@ -298,7 +298,7 @@ tasks:
     type: io.kestra.plugin.scripts.shell.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: mcr.microsoft.com/powershell:latest
+      image: mcr.microsoft.com/powershell:latest
     env:
       AD_DOMAIN: "{{ secret('AD_DOMAIN') }}"
       AD_DC: "{{ secret('AD_DC') }}"
@@ -382,7 +382,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
       AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
@@ -464,7 +464,7 @@ tasks:
         type: io.kestra.plugin.scripts.python.Script
         taskRunner:
           type: io.kestra.plugin.scripts.runner.docker.Docker
-          containerImage: automit/python-erp:3.12
+          image: automit/python-erp:3.12
         env:
           CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
           CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
@@ -570,7 +570,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
       AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"

@@ -27,10 +27,10 @@ sla:
 
 inputs:
   - id: action_type
-    type: STRING
+    type: SELECT
     required: true
     defaults: "onboarding"
-    allowedValues: [onboarding]
+    values: [onboarding]
 
   - id: first_name
     type: STRING
@@ -48,16 +48,16 @@ inputs:
     description: "Intitule du poste (ex: Operateur CN, Ingenieur Qualite)"
 
   - id: department
-    type: STRING
+    type: SELECT
     required: true
-    allowedValues: [production, quality, engineering, logistics, finance, hr, it, management]
+    values: [production, quality, engineering, logistics, finance, hr, it, management]
     description: "Service d'affectation"
 
   - id: site
-    type: STRING
+    type: SELECT
     required: true
     defaults: "serre-castet"
-    allowedValues: [serre-castet, tanger]
+    values: [serre-castet, tanger]
     description: "Site physique"
 
   - id: manager_email
@@ -71,16 +71,16 @@ inputs:
     description: "Date d'arrivee (YYYY-MM-DD)"
 
   - id: contract_type
-    type: STRING
+    type: SELECT
     required: true
     defaults: "cdi"
-    allowedValues: [cdi, cdd, interim, stagiaire, prestataire]
+    values: [cdi, cdd, interim, stagiaire, prestataire]
 
   - id: erp_access
-    type: STRING
-    required: false
+    type: SELECT
+    required: true
     defaults: "none"
-    allowedValues: [none, cegid, sage_x3, both]
+    values: [none, cegid, sage_x3, both]
     description: "Acces ERP requis"
 
   - id: erp_profile
@@ -89,10 +89,10 @@ inputs:
     description: "Profil ERP (ex: CONSULTATION, SAISIE, ADMIN) — JSON si multiple"
 
   - id: m365_license
-    type: STRING
-    required: false
+    type: SELECT
+    required: true
     defaults: "E3"
-    allowedValues: [E3, E1, F3, none]
+    values: [E3, E1, F3, none]
     description: "Type de licence Microsoft 365"
 
   - id: sensitive_groups
@@ -102,7 +102,7 @@ inputs:
 
   - id: vpn_access
     type: BOOLEAN
-    required: false
+    required: true
     defaults: false
     description: "Acces VPN requis"
 
@@ -124,7 +124,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       import hashlib
@@ -311,7 +311,7 @@ tasks:
     type: io.kestra.plugin.scripts.shell.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: mcr.microsoft.com/powershell:latest
+      image: mcr.microsoft.com/powershell:latest
     env:
       AD_DOMAIN: "{{ secret('AD_DOMAIN') }}"
       AD_DC: "{{ secret('AD_DC') }}"
@@ -403,7 +403,7 @@ tasks:
         type: io.kestra.plugin.scripts.python.Script
         taskRunner:
           type: io.kestra.plugin.scripts.runner.docker.Docker
-          containerImage: automit/python-erp:3.12
+          image: automit/python-erp:3.12
         env:
           AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
           AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
@@ -488,7 +488,7 @@ tasks:
         type: io.kestra.plugin.scripts.python.Script
         taskRunner:
           type: io.kestra.plugin.scripts.runner.docker.Docker
-          containerImage: automit/python-erp:3.12
+          image: automit/python-erp:3.12
         env:
           CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
           CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
@@ -611,7 +611,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
       AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"

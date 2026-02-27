@@ -25,15 +25,15 @@ inputs:
     description: "Résumé de l'incident généré par l'agent"
 
   - id: affected_system
-    type: STRING
+    type: SELECT
     required: true
-    allowedValues: [cegid, sage_x3, active_directory, m365, network, other]
+    values: [cegid, sage_x3, active_directory, m365, network, other]
 
   - id: severity
-    type: STRING
+    type: SELECT
     required: true
     defaults: "medium"
-    allowedValues: [low, medium, high, critical]
+    values: [low, medium, high, critical]
 
   - id: agent_diagnosis
     type: STRING
@@ -68,7 +68,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       import hashlib
@@ -156,7 +156,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     script: |
       import json
       print("✅ Validation humaine reçue — exécution des actions correctives")
@@ -203,7 +203,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      containerImage: automit/python-erp:3.12
+      image: automit/python-erp:3.12
     env:
       AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
       AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
