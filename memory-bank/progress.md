@@ -11,12 +11,17 @@
 - [x] Custom Docker image automit/python-erp:3.12 (ODBC 17, corporate CA)
 - [x] Connectivity tests (8/8 PASS: CEGID MCP + Sage X3 MCP)
 - [x] Corporate proxy workaround (nginx sidecar for ZeroClaw TLS)
+- [x] **Entra ID App Registration** (RSSI approved, credentials configured)
+- [x] **First real deployment** on dev machine (10.28.50.7) — full cycle validated
+- [x] **Prometheus metrics pipeline**: Pushgateway -> Prometheus -> Grafana with real data
+- [x] Kestra v22.04 compatibility fixes (containerImage, SELECT inputs, Pebble escaping)
 
 ## Pending
-- [ ] Entra ID App Registration (RSSI approval)
+- [ ] Fix Teams notifications (inject corporate CA into Kestra JVM trust store)
 - [ ] AD service account delegation on OUs
 - [ ] AD DC connectivity from Docker
 - [ ] ActiveDirectory PowerShell module in containers
 - [ ] ad-maintenance.yml: replace stub with real cmdlets
 - [ ] Production deployment on target VM
 - [ ] ZeroClaw L3 pilot
+- [ ] Install Kestra KV Store plugin
