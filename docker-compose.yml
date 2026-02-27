@@ -18,6 +18,7 @@ services:
     image: kestra/kestra:latest
     pull_policy: always
     user: "root"
+    entrypoint: ["/opt/scripts/kestra-entrypoint.sh"]
     command: server local
     env_file:
       - kestra-secrets.env
@@ -29,6 +30,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /tmp/kestra-wd:/tmp/kestra-wd
       - ./kestra/flows:/app/flows  # Auto-load flows
+      - ./zeroclaw/ca-bundle.pem:/etc/ssl/certs/corporate-ca.pem:ro
+      - ./scripts/docker/kestra-entrypoint.sh:/opt/scripts/kestra-entrypoint.sh:ro
     environment:
       KESTRA_CONFIGURATION: |
         kestra:
@@ -212,7 +215,11 @@ services:
     ports:
       - "3000:3000"
     environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/automit-overview.json
     volumes:
       - grafana-data:/var/lib/grafana

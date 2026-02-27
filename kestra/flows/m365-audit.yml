@@ -686,9 +686,9 @@ tasks:
 
               <h3>Securite</h3>
               <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;">
-                <tr><td><b>Sans MFA</b></td><td>{sec.get('mfa', {{}}).get('users_without_mfa', 'N/A')}</td></tr>
-                <tr><td><b>Utilisateurs a risque</b></td><td>{sec.get('risky_users', {{}}).get('count', 'N/A')}</td></tr>
-                <tr><td><b>Sign-ins suspects (7j)</b></td><td>{sec.get('risky_signins', {{}}).get('count_7d', 'N/A')}</td></tr>
+                <tr><td><b>Sans MFA</b></td><td>{sec.get('mfa', dict()).get('users_without_mfa', 'N/A')}</td></tr>
+                <tr><td><b>Utilisateurs a risque</b></td><td>{sec.get('risky_users', dict()).get('count', 'N/A')}</td></tr>
+                <tr><td><b>Sign-ins suspects (7j)</b></td><td>{sec.get('risky_signins', dict()).get('count_7d', 'N/A')}</td></tr>
               </table>
 
               <h3>Recommandations ({reco_count})</h3>

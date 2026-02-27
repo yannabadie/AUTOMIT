@@ -65,7 +65,7 @@ tasks:
                   "status": "OK",
                   "response_time_ms": elapsed_ms,
                   "tool": "database_overview",
-                  "detail": str(resp)[:300]
+                  "detail": json.dumps(resp, default=str)[:300]
               }
               print(json.dumps({"level": "INFO", "msg": "CEGID MCP OK", "response_time_ms": elapsed_ms}))
           except Exception as e:
@@ -93,7 +93,7 @@ tasks:
                   "status": "OK",
                   "response_time_ms": elapsed_ms,
                   "tool": "database_overview",
-                  "detail": str(resp)[:300]
+                  "detail": json.dumps(resp, default=str)[:300]
               }
               print(json.dumps({"level": "INFO", "msg": "Sage X3 MCP OK", "response_time_ms": elapsed_ms}))
           except Exception as e:
@@ -271,11 +271,16 @@ tasks:
       from datetime import datetime
       from lib.mcp_client import get_graph_token, send_graph_email
 
-      # --- Collect all results ---
-      mcp = json.loads('''{{ outputs.test_mcp_connectivity.vars.mcp_results }}''')
-      graph = json.loads('''{{ outputs.test_graph_api.vars.graph_result }}''')
-      pushgw = json.loads('''{{ outputs.test_pushgateway.vars.pushgateway_result }}''')
-      zeroclaw = json.loads('''{{ outputs.test_zeroclaw.vars.zeroclaw_result }}''')
+      # --- Collect all results (r-strings to handle apostrophes in JSON) ---
+      _mcp_raw = r"""{{ outputs.test_mcp_connectivity.vars.mcp_results }}"""
+      _graph_raw = r"""{{ outputs.test_graph_api.vars.graph_result }}"""
+      _pushgw_raw = r"""{{ outputs.test_pushgateway.vars.pushgateway_result }}"""
+      _zc_raw = r"""{{ outputs.test_zeroclaw.vars.zeroclaw_result }}"""
+
+      mcp = json.loads(_mcp_raw)
+      graph = json.loads(_graph_raw)
+      pushgw = json.loads(_pushgw_raw)
+      zeroclaw = json.loads(_zc_raw)
 
       components = {
           "mcp_cegid": mcp.get("cegid", {}),
