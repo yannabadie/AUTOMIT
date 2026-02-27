@@ -90,6 +90,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
       networkMode: automit_motherson-net
+      extraHosts:
+        - "MAS_D0Z9TB4:10.28.25.31"
+        - "mas_d0z9tb4:10.28.25.31"
     env:
       CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
       CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
@@ -196,6 +199,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
       networkMode: automit_motherson-net
+      extraHosts:
+        - "MAS_D0Z9TB4:10.28.25.31"
+        - "mas_d0z9tb4:10.28.25.31"
     env:
       CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
       CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
@@ -261,6 +267,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
       networkMode: automit_motherson-net
+      extraHosts:
+        - "MAS_D0Z9TB4:10.28.25.31"
+        - "mas_d0z9tb4:10.28.25.31"
     env:
       CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
       CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"

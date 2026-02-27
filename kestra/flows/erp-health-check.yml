@@ -35,6 +35,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
       networkMode: automit_motherson-net
+      extraHosts:
+        - "MAS_D0Z9TB4:10.28.25.31"
+        - "mas_d0z9tb4:10.28.25.31"
     env:
       CEGID_MCP_URL: "{{ secret('MCP_CEGID_ORACLE_URL') }}"
       CEGID_MCP_TOKEN: "{{ secret('MCP_CEGID_ORACLE_TOKEN') }}"
@@ -185,6 +188,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
       networkMode: automit_motherson-net
+      extraHosts:
+        - "MAS_D0Z9TB4:10.28.25.31"
+        - "mas_d0z9tb4:10.28.25.31"
     env:
       X3_MCP_URL: "{{ secret('X3_MCP_URL') }}"
       X3_MCP_TOKEN: "{{ secret('X3_MCP_TOKEN') }}"
@@ -207,24 +213,22 @@ tasks:
 
       import requests
 
-      # Teste la connectivite MCP x3-oracle
+      # Teste la connectivite MCP x3-oracle (JSON-RPC POST, pas GET)
+      from lib.mcp_client import mcp_call
       try:
           t0 = time.time()
-          resp = requests.get(
-              mcp_url.rstrip("/"),
-              headers=headers,
-              timeout=15
-          )
+          result = mcp_call(mcp_url, mcp_token, "database_overview", {}, timeout=15)
           response_ms = round((time.time() - t0) * 1000)
           checks["checks"]["mcp_connection"] = {
-              "status": "OK" if resp.status_code < 400 else "CRITICAL",
-              "response_time_ms": response_ms,
-              "http_status": resp.status_code
+              "status": "OK",
+              "response_time_ms": response_ms
           }
       except Exception as e:
+          response_ms = round((time.time() - t0) * 1000) if 't0' in dir() else -1
           checks["checks"]["mcp_connection"] = {
               "status": "CRITICAL",
-              "error": str(e)
+              "response_time_ms": response_ms,
+              "error": str(e)[:200]
           }
           checks["overall_status"] = "CRITICAL"
 
@@ -291,6 +295,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
       networkMode: automit_motherson-net
+      extraHosts:
+        - "MAS_D0Z9TB4:10.28.25.31"
+        - "mas_d0z9tb4:10.28.25.31"
     env:
       AZURE_TENANT_ID: "{{ secret('AZURE_TENANT_ID') }}"
       AZURE_CLIENT_ID: "{{ secret('AZURE_CLIENT_ID') }}"
@@ -490,6 +497,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
       networkMode: automit_motherson-net
+      extraHosts:
+        - "MAS_D0Z9TB4:10.28.25.31"
+        - "mas_d0z9tb4:10.28.25.31"
     script: |
       import json
       import os

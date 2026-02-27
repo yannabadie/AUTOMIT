@@ -23,6 +23,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       image: automit/python-erp:3.12
       networkMode: automit_motherson-net
+      extraHosts:
+        - "MAS_D0Z9TB4:10.28.25.31"
+        - "mas_d0z9tb4:10.28.25.31"
     script: |
       import json
       import time
