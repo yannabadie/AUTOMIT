@@ -493,15 +493,20 @@ tasks:
       from datetime import datetime
       from lib.logging import log_info, log_warn, log_error
 
-      # Agréger les résultats
+      # Agréger les résultats — use json.loads with escaped strings
+      # (triple quotes can break if JSON output contains apostrophes)
+      _cegid_raw = r"""{{ outputs.check_cegid.vars.cegid_health }}"""
+      _x3_raw = r"""{{ outputs.check_sage_x3.vars.sage_health }}"""
+      _m365_raw = r"""{{ outputs.check_m365.vars.m365_health }}"""
+
       report = {
           "timestamp": datetime.utcnow().isoformat() + "Z",
           "source": "kestra/erp-health-check",
           "execution_id": "{{ execution.id }}",
           "systems": {
-              "cegid": json.loads('''{{ outputs.check_cegid.vars.cegid_health }}'''),
-              "sage_x3": json.loads('''{{ outputs.check_sage_x3.vars.sage_health }}'''),
-              "m365": json.loads('''{{ outputs.check_m365.vars.m365_health }}''')
+              "cegid": json.loads(_cegid_raw),
+              "sage_x3": json.loads(_x3_raw),
+              "m365": json.loads(_m365_raw)
           }
       }
 
@@ -531,7 +536,7 @@ tasks:
           for sys_name in ("cegid", "sage_x3", "m365"):
               sys_data = report["systems"].get(sys_name, {})
               val = status_map.get(sys_data.get("overall_status", "HEALTHY"), 2)
-              metrics_lines.append(f'automit_erp_health{{system="{sys_name}"}} {val}')
+              metrics_lines.append('automit_erp_health{system="' + sys_name + '"} ' + str(val))
 
           # M365 health
           m365 = report["systems"].get("m365", {})
@@ -553,13 +558,13 @@ tasks:
           # MCP response time
           mcp_conn = cegid_checks.get("mcp_connection", {})
           if isinstance(mcp_conn, dict) and isinstance(mcp_conn.get("response_time_ms"), (int, float)):
-              metrics_lines.append(f'automit_mcp_response_time_ms{{server="cegid"}} {mcp_conn["response_time_ms"]}')
+              metrics_lines.append('automit_mcp_response_time_ms{server="cegid"} ' + str(mcp_conn["response_time_ms"]))
 
           # Sage X3 MCP response time
           x3 = report["systems"].get("sage_x3", {})
           x3_mcp = x3.get("checks", {}).get("mcp_connection", {})
           if isinstance(x3_mcp, dict) and isinstance(x3_mcp.get("response_time_ms"), (int, float)):
-              metrics_lines.append(f'automit_mcp_response_time_ms{{server="sage_x3"}} {x3_mcp["response_time_ms"]}')
+              metrics_lines.append('automit_mcp_response_time_ms{server="sage_x3"} ' + str(x3_mcp["response_time_ms"]))
 
           # M365 licences
           m365_checks = m365.get("checks", {})

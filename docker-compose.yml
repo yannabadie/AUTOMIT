@@ -19,6 +19,8 @@ services:
     pull_policy: always
     user: "root"
     command: server local
+    env_file:
+      - kestra-secrets.env
     ports:
       - "8080:8080"
       - "8081:8081"  # Management port
