@@ -306,7 +306,7 @@ tasks:
     then:
       - id: send_teams_alert
         type: io.kestra.plugin.core.http.Request
-        uri: "{{ vars.teams_webhook_url }}"
+        uri: "{{ secret('TEAMS_WEBHOOK_URL') }}"
         method: POST
         contentType: application/json
         body: |
@@ -338,7 +338,7 @@ tasks:
 errors:
   - id: on_error
     type: io.kestra.plugin.core.http.Request
-    uri: "{{ vars.teams_webhook_url }}"
+    uri: "{{ secret('TEAMS_WEBHOOK_URL') }}"
     method: POST
     contentType: application/json
     body: |

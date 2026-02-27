@@ -324,7 +324,7 @@ tasks:
   # -------------------------------------------------------------------------
   - id: notify_teams
     type: io.kestra.plugin.core.http.Request
-    uri: "{{ vars.teams_webhook_url }}"
+    uri: "{{ secret('TEAMS_WEBHOOK_URL') }}"
     method: POST
     contentType: application/json
     body: |
