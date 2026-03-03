@@ -38,3 +38,11 @@ flows_check.json
 err*.json
 import_result*.json
 flows_final.json
+
+# Temporary debug/log dumps at repo root
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!docs/**/*.json
+!.claude/**
