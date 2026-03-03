@@ -170,6 +170,7 @@ triggers:
   - id: weekly_maintenance
     type: io.kestra.plugin.core.trigger.Schedule
     cron: "0 6 * * 1"  # Chaque lundi à 6h
+    recoverMissedSchedules: NONE
 
   - id: agent_triggered
     type: io.kestra.plugin.core.trigger.Webhook

@@ -480,6 +480,7 @@ triggers:
   - id: weekly_selftest
     type: io.kestra.plugin.core.trigger.Schedule
     cron: "0 22 * * 0"
+    recoverMissedSchedules: NONE
 
   # Webhook pour declenchement ad-hoc
   - id: adhoc_selftest

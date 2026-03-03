@@ -774,6 +774,7 @@ triggers:
   - id: weekly_audit
     type: io.kestra.plugin.core.trigger.Schedule
     cron: "0 7 * * 1"
+    recoverMissedSchedules: NONE
 
   # Webhook pour declenchement ad-hoc (ZeroClaw / Claude Desktop)
   - id: adhoc_audit

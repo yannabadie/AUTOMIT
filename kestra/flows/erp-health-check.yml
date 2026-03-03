@@ -655,6 +655,7 @@ triggers:
   - id: scheduled_health
     type: io.kestra.plugin.core.trigger.Schedule
     cron: "*/5 * * * *"
+    recoverMissedSchedules: NONE
 
   # Webhook pour déclencher un check ad-hoc
   - id: adhoc_check

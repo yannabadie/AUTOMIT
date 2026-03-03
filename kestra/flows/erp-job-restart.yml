@@ -381,3 +381,4 @@ triggers:
     type: io.kestra.plugin.core.trigger.Schedule
     cron: "*/15 * * * *"  # Toutes les 15 minutes
     disabled: true  # Activer si nécessaire
+    recoverMissedSchedules: NONE
