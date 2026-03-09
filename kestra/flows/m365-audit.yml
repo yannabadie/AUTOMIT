@@ -779,4 +779,4 @@ triggers:
   # Webhook pour declenchement ad-hoc (ZeroClaw / Claude Desktop)
   - id: adhoc_audit
     type: io.kestra.plugin.core.trigger.Webhook
-    key: "{{ secret('KESTRA_WEBHOOK_KEY') }}"
+    key: "{{ secret('WEBHOOK_KEY_M365_AUDIT') }}"
