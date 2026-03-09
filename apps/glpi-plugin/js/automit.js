@@ -71,14 +71,71 @@
             container.innerHTML = html;
         }
 
+        function executeAction(action) {
+            var resultPanel = document.getElementById('automit-draft-output');
+            resultPanel.classList.remove('d-none');
+            resultPanel.innerHTML = '<div class="automit-executing"><div class="spinner-border spinner-border-sm me-2"></div>Execution en cours...</div>';
+
+            fetch(rootDoc + '/plugins/automit/ajax/execute.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Glpi-Csrf-Token': getAjaxCsrf(),
+                },
+                body: JSON.stringify({
+                    action_id: action.action_id,
+                    ticket_id: ticketId,
+                    tier: action.tier,
+                    target_type: action.target ? action.target.type : 'glpi_ticket',
+                    target_id: action.target ? action.target.id : String(ticketId),
+                    idempotency_key: action.idempotency_key || crypto.randomUUID(),
+                    justification: action.justification || '',
+                }),
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    var html = '<div class="automit-error">' + escapeHtml(data.error) + '</div>';
+                    if (data.action) {
+                        html += '<p class="automit-hint">' + escapeHtml(data.action) + '</p>';
+                    }
+                    resultPanel.innerHTML = html;
+                } else {
+                    var receiptId = (data.receipt && data.receipt.receipt_id) ? data.receipt.receipt_id : 'N/A';
+                    resultPanel.innerHTML = '<div class="automit-success">Action executee. Receipt: ' + escapeHtml(receiptId) + '</div>';
+                }
+            })
+            .catch(function(err) {
+                resultPanel.innerHTML = '<div class="automit-error">Erreur: ' + escapeHtml(err.message) + '</div>';
+            });
+        }
+
+        function getAjaxCsrf() {
+            // GLPI stores CSRF token in a meta tag or as a JS variable
+            var meta = document.querySelector('meta[name="csrf-token"]');
+            if (meta) return meta.getAttribute('content');
+            if (typeof CFG_GLPI !== 'undefined' && CFG_GLPI.csrf_token) return CFG_GLPI.csrf_token;
+            return '';
+        }
+
+        // Expose executeAction globally so inline onclick handlers can call it
+        window.automitExecuteAction = function(actionIndex) {
+            if (window._automitActions && window._automitActions[actionIndex]) {
+                executeAction(window._automitActions[actionIndex]);
+            }
+        };
+
         function renderActionCards(container, data) {
             if (!data.actions || data.actions.length === 0) {
                 container.classList.remove('d-none');
                 container.innerHTML = '<div class="alert alert-info">Aucune action proposee.</div>';
                 return;
             }
+            // Store actions globally for onclick access
+            window._automitActions = data.actions;
+
             var html = '<h5>Actions proposees</h5><div class="row g-3">';
-            data.actions.forEach(function(action) {
+            data.actions.forEach(function(action, index) {
                 var tierBadge = ['bg-info', 'bg-success', 'bg-warning', 'bg-danger'][action.tier] || 'bg-secondary';
                 html += '<div class="col-md-6"><div class="card">';
                 html += '<div class="card-header d-flex justify-content-between">';
@@ -89,9 +146,9 @@
                 html += '<p><strong>Justification:</strong> ' + escapeHtml(action.justification) + '</p>';
                 html += '<p><strong>Rollback:</strong> ' + escapeHtml(action.rollback_notes) + '</p>';
                 if (action.tier <= 1) {
-                    html += '<button class="btn btn-sm btn-primary" onclick="window.automitExecuteAction(\'' + escapeHtml(action.idempotency_key) + '\')">Executer</button>';
+                    html += '<button class="btn btn-sm btn-primary" onclick="window.automitExecuteAction(' + index + ')">Executer</button>';
                 } else {
-                    html += '<span class="text-muted">Requires Phase 5 governance</span>';
+                    html += '<button class="btn btn-sm btn-outline-warning" onclick="alert(\'Demandez une validation GLPI sur ce ticket avant d\\\'executer.\')">Validation requise</button>';
                 }
                 html += '</div></div></div>';
             });

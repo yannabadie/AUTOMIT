@@ -11,3 +11,36 @@
 #automit-loading {
     padding: 20px;
 }
+.automit-success {
+    padding: 12px 16px;
+    margin: 10px 0;
+    background-color: #d1e7dd;
+    color: #0f5132;
+    border: 1px solid #badbcc;
+    border-radius: 4px;
+}
+.automit-error {
+    padding: 12px 16px;
+    margin: 10px 0;
+    background-color: #f8d7da;
+    color: #842029;
+    border: 1px solid #f5c2c7;
+    border-radius: 4px;
+}
+.automit-hint {
+    padding: 8px 16px;
+    margin: 6px 0;
+    color: #664d03;
+    background-color: #fff3cd;
+    border: 1px solid #ffecb5;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+.automit-executing {
+    padding: 12px 16px;
+    margin: 10px 0;
+    color: #055160;
+    background-color: #cff4fc;
+    border: 1px solid #b6effb;
+    border-radius: 4px;
+}

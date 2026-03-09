@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { validateAction, recordExecution, isEmergencyStop } from "../policy-engine.js";
 import { createReceipt } from "../audit.js";
 import { hmacFetch } from "../hmac-fetch.js";
+import { ExecuteRequest } from "../schemas.js";
 
 const TOOL_GATEWAY_URL = process.env.TOOL_GATEWAY_URL || "http://localhost:3002";
 
@@ -12,11 +13,13 @@ export async function executeHandler(req: Request, res: Response): Promise<void>
       return;
     }
 
-    const action = req.body.action;
-    if (!action) {
-      res.status(400).json({ error: "action object required" });
+    const parsed = ExecuteRequest.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
+
+    const action = parsed.data.action;
 
     // Policy validation
     const policy = validateAction(action);

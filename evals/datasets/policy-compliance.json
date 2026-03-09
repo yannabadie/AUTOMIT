@@ -1,0 +1,138 @@
+{
+  "description": "Policy engine compliance test cases",
+  "version": "1.0.0",
+  "test_cases": [
+    {
+      "id": "T0-001",
+      "name": "Tier 0 read-only always allowed",
+      "input": {
+        "action_id": "get_ticket",
+        "tier": 0,
+        "target": {"id": "42"},
+        "requestor": {"interface": "central"},
+        "ttl_seconds": 300,
+        "issued_at": 0
+      },
+      "expected": {"allowed": true}
+    },
+    {
+      "id": "T1-001",
+      "name": "Tier 1 followup allowed with right",
+      "input": {
+        "action_id": "add_followup",
+        "tier": 1,
+        "target": {"id": "42"},
+        "requestor": {"interface": "central", "right": "plugin_automit_execute"},
+        "ttl_seconds": 300,
+        "issued_at": 0
+      },
+      "expected": {"allowed": true}
+    },
+    {
+      "id": "T1-002",
+      "name": "Tier 1 blocked without right",
+      "input": {
+        "action_id": "add_followup",
+        "tier": 1,
+        "target": {"id": "42"},
+        "requestor": {"interface": "central"},
+        "ttl_seconds": 300,
+        "issued_at": 0
+      },
+      "expected": {"allowed": false, "reason_contains": "Missing right"}
+    },
+    {
+      "id": "T2-001",
+      "name": "Tier 2 requires GLPI validation approval",
+      "input": {
+        "action_id": "restart_erp_job",
+        "tier": 2,
+        "target": {"id": "IMPORT_COMMANDES"},
+        "requestor": {"interface": "central", "right": "plugin_automit_critical"},
+        "ttl_seconds": 300,
+        "issued_at": 0
+      },
+      "expected": {"allowed": true, "requires_approval": "glpi_validation"}
+    },
+    {
+      "id": "T3-001",
+      "name": "Tier 3 requires dual approval",
+      "input": {
+        "action_id": "delete_ad_account",
+        "tier": 3,
+        "target": {"id": "user@domain.com"},
+        "requestor": {"interface": "central", "right": "plugin_automit_critical"},
+        "ttl_seconds": 300,
+        "issued_at": 0
+      },
+      "expected": {"allowed": true, "requires_approval": "dual"}
+    },
+    {
+      "id": "ESTOP-001",
+      "name": "Emergency stop blocks Tier 1+",
+      "precondition": "emergency_stop = true",
+      "input": {
+        "action_id": "add_followup",
+        "tier": 1,
+        "target": {"id": "42"},
+        "requestor": {"interface": "central", "right": "plugin_automit_execute"},
+        "ttl_seconds": 300,
+        "issued_at": 0
+      },
+      "expected": {"allowed": false, "reason_contains": "Emergency stop"}
+    },
+    {
+      "id": "ESTOP-002",
+      "name": "Emergency stop allows Tier 0 analysis",
+      "precondition": "emergency_stop = true",
+      "input": {
+        "action_id": "get_ticket",
+        "tier": 0,
+        "target": {"id": "42"},
+        "requestor": {"interface": "central"},
+        "ttl_seconds": 300,
+        "issued_at": 0
+      },
+      "expected": {"allowed": true}
+    },
+    {
+      "id": "IFACE-001",
+      "name": "Helpdesk interface blocked",
+      "input": {
+        "action_id": "get_ticket",
+        "tier": 0,
+        "target": {"id": "42"},
+        "requestor": {"interface": "helpdesk"},
+        "ttl_seconds": 300,
+        "issued_at": 0
+      },
+      "expected": {"allowed": false, "reason_contains": "Central interface"}
+    },
+    {
+      "id": "TARGET-001",
+      "name": "Empty target ID blocked",
+      "input": {
+        "action_id": "get_ticket",
+        "tier": 0,
+        "target": {"id": ""},
+        "requestor": {"interface": "central"},
+        "ttl_seconds": 300,
+        "issued_at": 0
+      },
+      "expected": {"allowed": false, "reason_contains": "target ID"}
+    },
+    {
+      "id": "TTL-001",
+      "name": "Expired TTL blocked",
+      "input": {
+        "action_id": "add_followup",
+        "tier": 1,
+        "target": {"id": "42"},
+        "requestor": {"interface": "central", "right": "plugin_automit_execute"},
+        "ttl_seconds": 60,
+        "issued_at": 1000000
+      },
+      "expected": {"allowed": false, "reason_contains": "expired"}
+    }
+  ]
+}

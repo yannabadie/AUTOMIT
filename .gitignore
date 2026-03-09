@@ -48,4 +48,5 @@ flows_final.json
 !package-lock.json
 !tsconfig.json
 !docs/**/*.json
+!evals/**/*.json
 !.claude/**

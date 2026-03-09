@@ -4,8 +4,17 @@ from middleware.auth import verify_hmac
 from adapters.glpi import router as glpi_router
 from adapters.erp import router as erp_router
 from adapters.m365 import router as m365_router
+from adapters.state import router as state_router, init_schema
 
 app = FastAPI(title="AutomIT Tool Gateway", version="1.0.0")
+
+
+@app.on_event("startup")
+def startup():
+    try:
+        init_schema()
+    except Exception as e:
+        print(f"[WARN] Could not init schema: {e}")
 
 
 class HMACAuthMiddleware(BaseHTTPMiddleware):
@@ -27,6 +36,7 @@ app.add_middleware(HMACAuthMiddleware)
 app.include_router(glpi_router, prefix="/glpi", tags=["GLPI"])
 app.include_router(erp_router, prefix="/erp", tags=["ERP"])
 app.include_router(m365_router, prefix="/m365", tags=["M365"])
+app.include_router(state_router, prefix="/state", tags=["State"])
 
 
 @app.get("/health")

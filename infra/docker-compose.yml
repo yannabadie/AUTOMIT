@@ -123,6 +123,10 @@ services:
       - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
       - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
       - AUTOMIT_HMAC_SECRET=${AUTOMIT_HMAC_SECRET}
+      - DATABASE_URL=postgresql://kestra:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/kestra
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - motherson-net
     restart: unless-stopped
