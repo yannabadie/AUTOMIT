@@ -2,7 +2,7 @@
 # MOTHERSON AEROSPACE — IT Automation Stack
 # Kestra (Orchestrator) + Supporting Services
 # =============================================================================
-# Usage: docker compose up -d
+# Usage: docker compose -f infra/docker-compose.yml up -d
 # Kestra UI:       http://localhost:8080
 # Prometheus:       http://localhost:9090
 # Grafana:          http://localhost:3000
@@ -19,7 +19,7 @@ services:
     entrypoint: ["/opt/scripts/kestra-entrypoint.sh"]
     command: server local
     env_file:
-      - kestra-secrets.env
+      - ../kestra-secrets.env
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:8081:8081"  # Management port
@@ -27,8 +27,8 @@ services:
       - kestra-data:/app/storage
       - /var/run/docker.sock:/var/run/docker.sock
       - /tmp/kestra-wd:/tmp/kestra-wd
-      - ./kestra/flows:/app/flows  # Auto-load flows
-      - ./scripts/docker/kestra-entrypoint.sh:/opt/scripts/kestra-entrypoint.sh:ro
+      - ../kestra/flows:/app/flows  # Auto-load flows
+      - ../scripts/docker/kestra-entrypoint.sh:/opt/scripts/kestra-entrypoint.sh:ro
     environment:
       KESTRA_CONFIGURATION: |
         kestra:
@@ -111,8 +111,8 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
-      - ./docs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./docs/prometheus/alert-rules.yml:/etc/prometheus/rules/alert-rules.yml:ro
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert-rules.yml:/etc/prometheus/rules/alert-rules.yml:ro
     networks:
       - motherson-net
     restart: unless-stopped
@@ -148,9 +148,9 @@ services:
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/automit-overview.json
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./docs/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
-      - ./docs/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./docs/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
       - loki
@@ -168,7 +168,7 @@ services:
     ports:
       - "127.0.0.1:3100:3100"
     volumes:
-      - ./docs/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro
       - loki-data:/loki
     command: -config.file=/etc/loki/local-config.yaml
     networks:
