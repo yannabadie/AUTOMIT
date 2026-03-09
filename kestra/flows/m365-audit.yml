@@ -180,20 +180,36 @@ tasks:
 
       cutoff = (datetime.now(timezone.utc) - timedelta(days=threshold_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+      def graph_get_all(url, headers):
+          """Follow @odata.nextLink until exhaustion with throttling."""
+          results = []
+          while url:
+              resp = requests.get(url, headers=headers, timeout=30)
+              if resp.status_code == 429:
+                  retry_after = int(resp.headers.get("Retry-After", "60"))
+                  print(f"Graph API throttled, waiting {retry_after}s")
+                  import time
+                  time.sleep(min(retry_after, 120))
+                  continue
+              resp.raise_for_status()
+              data = resp.json()
+              results.extend(data.get("value", []))
+              url = data.get("@odata.nextLink")
+          return results
+
       try:
           # Obtenir les utilisateurs avec last sign-in
           # Necessite: AuditLog.Read.All + Directory.Read.All
-          resp = requests.get(
+          users = graph_get_all(
               "https://graph.microsoft.com/v1.0/users"
               "?$select=displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses,department,jobTitle"
               "&$filter=accountEnabled eq true"
-              "&$top=999"
+              "&$top=100"
               "&$count=true",
-              headers=headers, timeout=30
+              headers
           )
 
-          if resp.status_code == 200:
-              users = resp.json().get("value", [])
+          if users is not None:
               total_users = len(users)
               inactive = []
               no_signin = []
@@ -239,16 +255,17 @@ tasks:
               print(f"Utilisateurs actifs: {total_users}")
               print(f"Inactifs >{threshold_days}j: {len(inactive)} ({sum(1 for u in inactive if u.get('has_licenses'))} avec licences)")
               print(f"Jamais connectes: {len(no_signin)}")
-          elif resp.status_code == 403:
+
+      except requests.exceptions.HTTPError as he:
+          if he.response is not None and he.response.status_code == 403:
               report["summary"] = {
                   "status": "WARNING",
                   "detail": "Permissions requises: AuditLog.Read.All + Directory.Read.All"
               }
               print("⚠️ Permission insuffisante pour signInActivity")
           else:
-              report["summary"] = {"status": "ERROR", "http_status": resp.status_code, "detail": resp.text[:300]}
-              print(f"❌ Erreur: HTTP {resp.status_code}")
-
+              report["summary"] = {"status": "ERROR", "error": str(he)}
+              print(f"❌ Erreur audit inactifs: {he}")
       except Exception as e:
           report["summary"] = {"status": "ERROR", "error": str(e)}
           print(f"❌ Erreur audit inactifs: {e}")
@@ -624,7 +641,7 @@ tasks:
           "name": "📋 Details dans Kestra",
           "targets": [{
             "os": "default",
-            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+            "uri": "{{ envs.KESTRA_EXTERNAL_URL ?? 'http://localhost:8080' }}/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
           }]
         }]
       }

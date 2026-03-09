@@ -272,7 +272,7 @@ tasks:
           "name": "✅ Valider dans Kestra",
           "targets": [{
             "os": "default",
-            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+            "uri": "{{ envs.KESTRA_EXTERNAL_URL ?? 'http://localhost:8080' }}/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
           }]
         }]
       }
@@ -502,7 +502,7 @@ tasks:
                       os.environ["CEGID_MCP_URL"],
                       os.environ["CEGID_MCP_TOKEN"],
                       "query_database",
-                      {"sql": f"SELECT TOP 1 UTI_LOGIN, UTI_ACTIF FROM UTILISATEURS WHERE UTI_LOGIN LIKE '%{sam_safe}%'", "limit": 1}
+                      {"sql": f"SELECT TOP 1 UTI_LOGIN, UTI_ACTIF FROM UTILISATEURS WHERE UTI_LOGIN = N'{sam_safe}'", "limit": 1}
                   )
                   print(f"  CEGID: {str(check)[:300]}")
                   result["erp_revoked"].append({
@@ -522,7 +522,7 @@ tasks:
                       os.environ["X3_MCP_URL"],
                       os.environ["X3_MCP_TOKEN"],
                       "query_database",
-                      {"sql": f"SELECT USR_0, ESSION_0 FROM AUTILIS WHERE USR_0 LIKE '%{sam_safe.upper()[:10]}%'", "limit": 1}
+                      {"sql": f"SELECT USR_0, ESSION_0 FROM AUTILIS WHERE USR_0 = N'{sam_safe.upper()[:10]}'", "limit": 1}
                   )
                   print(f"  X3: {str(check)[:300]}")
                   result["erp_revoked"].append({
@@ -570,7 +570,7 @@ tasks:
           "name": "📋 Details dans Kestra",
           "targets": [{
             "os": "default",
-            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+            "uri": "{{ envs.KESTRA_EXTERNAL_URL ?? 'http://localhost:8080' }}/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
           }]
         }]
       }

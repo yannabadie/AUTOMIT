@@ -35,9 +35,15 @@ inputs:
       - sage_x3
 
   - id: job_name
-    type: STRING
+    type: SELECT
     required: true
-    description: "Nom du job à relancer (ex: IMPORT_COMMANDES, SYNC_STOCK)"
+    description: "Job a relancer (liste controlee)"
+    values:
+      - IMPORT_COMMANDES
+      - SYNC_STOCK
+      - EXPORT_FACTURES
+      - SYNC_ARTICLES
+      - IMPORT_OF
 
   - id: failure_count
     type: INT
@@ -129,7 +135,7 @@ tasks:
                            3, 0, ':'), 6, 0, ':') AS DATETIME) AS last_run
                   FROM msdb.dbo.sysjobhistory h
                   JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
-                  WHERE j.name LIKE '%{job}%'
+                  WHERE j.name = N'{job}'
                   AND h.step_id = 0
                   ORDER BY h.instance_id DESC
               """
@@ -224,9 +230,39 @@ tasks:
           mcp_url = os.environ["CEGID_MCP_URL"]
           mcp_token = os.environ["CEGID_MCP_TOKEN"]
           try:
-              # Relancer le job SQL Agent via query_database (EXEC sp_start_job)
-              sql = f"EXEC msdb.dbo.sp_start_job @job_name = N'{job}'"
-              resp_data = mcp_call(mcp_url, mcp_token, "query_database", {"sql": sql})
+              import re
+              ALLOWED_JOB_PATTERN = re.compile(r'^[A-Za-z0-9_\-]{1,128}$')
+              if not ALLOWED_JOB_PATTERN.match(job):
+                  log_error("Invalid job name rejected by allowlist", job=job)
+                  sys.exit(1)
+
+              # Verify job exists with exact match before restart
+              verify_sql = f"SELECT name FROM msdb.dbo.sysjobs WHERE name = N'{job}'"
+              verify_data = mcp_call(mcp_url, mcp_token, "query_database", {"sql": verify_sql})
+
+              # Check result has rows
+              rows = []
+              if isinstance(verify_data, dict):
+                  content = verify_data.get("content", [])
+                  if isinstance(content, list):
+                      for item in content:
+                          if isinstance(item, dict) and "text" in item:
+                              try:
+                                  parsed = json.loads(item["text"])
+                                  rows = parsed if isinstance(parsed, list) else [parsed]
+                              except (json.JSONDecodeError, TypeError):
+                                  pass
+
+              if not rows:
+                  result["error"] = f"Job '{job}' not found in SQL Agent (exact match)"
+                  log_error("Job not found", erp="cegid", job=job)
+                  from kestra import Kestra
+                  Kestra.outputs(result)
+                  sys.exit(1)
+
+              # Restart using verified job name
+              restart_sql = f"EXEC msdb.dbo.sp_start_job @job_name = N'{job}'"
+              resp_data = mcp_call(mcp_url, mcp_token, "query_database", {"sql": restart_sql})
               result["success"] = True
               result["message"] = f"Job '{job}' demarre via MCP cegid-oracle (sp_start_job)"
               result["mcp_response"] = str(resp_data)[:500]
@@ -300,7 +336,7 @@ tasks:
                   SELECT TOP 1 h.run_status
                   FROM msdb.dbo.sysjobhistory h
                   JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
-                  WHERE j.name LIKE '%{job}%' AND h.step_id = 0
+                  WHERE j.name = N'{job}' AND h.step_id = 0
                   ORDER BY h.instance_id DESC
               """
               mcp_result = mcp_call(mcp_url, mcp_token, "query_database", {"sql": sql, "limit": 1})
