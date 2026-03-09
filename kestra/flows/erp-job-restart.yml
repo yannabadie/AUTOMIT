@@ -260,11 +260,12 @@ tasks:
                   Kestra.outputs(result)
                   sys.exit(1)
 
-              # Restart using verified job name
-              restart_sql = f"EXEC msdb.dbo.sp_start_job @job_name = N'{job}'"
+              # Restart using DB-verified job name (not user input)
+              verified_name = rows[0]["name"]
+              restart_sql = f"EXEC msdb.dbo.sp_start_job @job_name = N'{verified_name}'"
               resp_data = mcp_call(mcp_url, mcp_token, "query_database", {"sql": restart_sql})
               result["success"] = True
-              result["message"] = f"Job '{job}' demarre via MCP cegid-oracle (sp_start_job)"
+              result["message"] = f"Job '{verified_name}' demarre via MCP cegid-oracle (sp_start_job)"
               result["mcp_response"] = str(resp_data)[:500]
               log_info("Job relance via MCP cegid-oracle", erp="cegid", job=job)
           except Exception as e:

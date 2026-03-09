@@ -1,5 +1,5 @@
+import asyncio
 import os
-import time
 import httpx
 from fastapi import APIRouter
 
@@ -34,7 +34,7 @@ async def graph_get_all(url: str, headers: dict) -> list:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", "60"))
-                time.sleep(min(retry_after, 120))
+                await asyncio.sleep(min(retry_after, 120))
                 continue
             resp.raise_for_status()
             data = resp.json()
