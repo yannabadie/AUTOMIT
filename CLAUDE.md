@@ -1,183 +1,201 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository.
 
 ## Project Overview
 
-**AutomIT** is a hybrid IT automation platform for Motherson Aerospace (Serre-Castet, France). It combines:
-- **Kestra** — Deterministic workflow orchestration engine (executes, traces, audits)
-- **ZeroClaw** — Proactive AI agent in Rust (observes, correlates, decides)
-- **Claude Desktop MCP** — Human supervision and control interface
+**AutomIT** is a production-grade IT automation platform for Motherson Aerospace (Serre-Castet, France). It follows a **three-tier architecture**:
 
-The platform monitors CEGID XRP Sprint, Sage X3, Active Directory, and Microsoft 365 using a three-tier autonomy model:
-- **L1**: Pre-approved auto-remediation (e.g., restart failed ERP job)
-- **L2**: Agent proposes, human approves via Kestra Pause (e.g., disable compromised AD account)
-- **L3**: Agent recommends, human acts (e.g., "increase timeout for recurring failures")
+1. **GLPI Plugin** (PHP) — User interface embedded in GLPI ticket view (Lane A: analyze/draft, Lane B: action cards)
+2. **Control Plane** (TypeScript) — Claude Agent SDK with policy engine, HMAC auth, audit trail, emergency stop
+3. **Tool Gateway** (Python/FastAPI) — Adapters for GLPI, ERP (CEGID/X3 via MCP), M365 (Graph API), with circuit breaker and cooldown
+4. **Kestra** — Deterministic workflow orchestration (cron + webhook triggers, Docker-isolated execution)
 
-**Status**: PoC complet — les 4 priorites sont implementees + envoi mail Graph API. Entra ID App Registration + Application Access Policy a configurer en prod.
+The platform monitors CEGID XRP Sprint, Sage X3, Active Directory, and Microsoft 365 using a **four-tier action taxonomy**:
+- **Tier 0**: Read-only (ticket context, ERP status) — no approval
+- **Tier 1**: Reversible ticket ops (add followup, change status) — auto-approved
+- **Tier 2**: Bounded external (restart ERP job, disable AD account) — GLPI validation required
+- **Tier 3**: Destructive (delete account, purge data) — dual approval (GLPI + Kestra break-glass)
 
-**Priorities**: (1) ~~Real ERP connections~~ DONE, (2) ~~Onboarding/offboarding flow~~ DONE, (3) ~~Microsoft Graph API integration~~ DONE, (4) ~~Grafana dashboard~~ DONE, (5) ~~Email notifications via Graph API Mail.Send~~ DONE.
-
-## Target Infrastructure
-
-- **Sage X3 (production)**: Accès **exclusivement via MCP x3-oracle** (`MAS_D0Z9TB4:8001`), pas de connexion SQL directe. Token auth `X-MCP-TOKEN`.
-- **CEGID XRP Sprint (MSC Maroc)**: Accès **exclusivement via MCP cegid-oracle** (`10.255.15.200:8000`). 20 outils MCP dont `query_database` (SQL read-only), `analyze_data_freshness`, `database_overview`. Token auth `X-MCP-TOKEN`. DB: `Y2_MSC_MAROC`. API REST désactivée (`CEGID_API_ENABLED=false`). Knowledge base: DB `CEGID_KB`. Domaine Windows: `MIND`. **Pas de connexion SQL directe** (port 1433 non accessible depuis Docker/réseau local).
-- **AD**: Windows Server 2022, DC: `dc01.motherson.local` / Compte service: `ADGROUPE\t1_yaa`
-- **M365**: E3 license, tenant: `adigroupe.onmicrosoft.com`. Entra ID App Registration requise (permissions: User.Read.All, Directory.Read.All, AuditLog.Read.All, Reports.Read.All, ServiceHealth.Read.All, SecurityEvents.Read.All, IdentityRiskyUser.Read.All, Mail.Send). Email: shared mailbox `automit-noreply@adigroupe.onmicrosoft.com` avec Application Access Policy pour restreindre Mail.Send.
-- **Compliance**: EN9100 (aerospace), sites Serre-Castet + Tanger
-
-### SSL/TLS Workarounds
-
-- **SQL Server (CEGID)**: `TrustServerCertificate=yes` + `Encrypt=yes` (self-signed server cert). Pool recycle 1800s to handle corporate firewall idle timeouts.
-- **Docker builds**: Corporate proxy requires injecting CA bundle (`C:\Code\X3-Oracle\docker\ca-bundle.pem`).
-- **ZeroClaw → OpenAI**: rustls+webpki-roots rejects corporate MITM cert (`UnknownIssuer`). Solved via nginx sidecar proxy (`openai-proxy` service) with `ca-bundle.pem` in system CA store. ZeroClaw calls `http://openai-proxy/backend-api/codex` → nginx proxies to `https://chatgpt.com/backend-api/codex`. Endpoint is `/backend-api/codex/responses` (NOT `/v1/responses`).
-
-## Stack & Operations
-
-All services run via Docker Compose. There is no traditional build/test/lint pipeline.
-
-```bash
-# Base stack (Kestra + PostgreSQL + ZeroClaw)
-docker compose up -d
-
-# With local LLM (Ollama + GPU)
-docker compose --profile local-llm up -d
-
-# With monitoring (Prometheus + Grafana)
-docker compose --profile monitoring up -d
-
-# Verify Kestra health
-curl -s http://localhost:8080/api/v1/health
-
-# List loaded flows
-curl -s http://localhost:8080/api/v1/flows | jq '.[] | .id'
-
-# ZeroClaw status
-docker exec motherson-it-automation-zeroclaw-erp-agent-1 zeroclaw status
-
-# Test ERP restart webhook
-curl -X POST "http://localhost:8080/api/v1/executions/webhook/motherson.it.erp/erp-job-restart/$(grep WEBHOOK_KEY_ERP_RESTART .env | cut -d= -f2)" \
-  -H "Content-Type: application/json" \
-  -d '{"erp_system":"cegid","job_name":"IMPORT_COMMANDES","failure_count":3}'
-```
-
-**Service endpoints**: Kestra UI at `:8080`, Kestra management at `:8081`, Ollama at `:11434`, Prometheus at `:9090`, Grafana at `:3000`.
+**Status**: v2 scaffold complete. PoC flows operational. Control plane and tool gateway scaffolded (Claude Agent SDK integration pending).
 
 ## Architecture
 
 ```
-Kestra cron (5min) → erp-health-check → sends report to ZeroClaw gateway
-ZeroClaw heartbeat → correlates with SQLite memory → decides L1/L2/L3
-  L1 → triggers Kestra flow via webhook (auto-execute)
-  L2 → triggers Kestra flow with Pause (awaits human approval)
-  L3 → logs recommendation to Teams
+GLPI Ticket View (PHP plugin)
+  │  HMAC-signed HTTP
+  ▼
+Control Plane (:3001, TypeScript/Express)
+  │  Claude Agent SDK (permissionMode: "dontAsk" + allowedTools)
+  │  Policy engine (tier validation, cooldowns, emergency stop)
+  │  Audit trail (receipt per action)
+  │  HMAC-signed HTTP
+  ▼
+Tool Gateway (:3002, Python/FastAPI)
+  ├── GLPI adapter (REST API, session-based auth)
+  ├── ERP adapter (CEGID MCP + X3 MCP, job registry)
+  ├── M365 adapter (Graph API, pagination + throttling)
+  ├── Circuit breaker (5 failures → 60s open)
+  └── Cooldown registry (per action+target rate limiting)
+  │
+  ▼
+Kestra (:8080, workflow orchestration)
+  ├── erp-health-check (cron 5min)
+  ├── erp-job-restart (webhook, allowlisted jobs)
+  ├── ad-onboarding / ad-offboarding (L2, 4-eyes)
+  ├── m365-audit (weekly + webhook)
+  └── incident-escalation-l2 (ticket + pause)
 ```
 
-The key constraint: **ZeroClaw never touches infrastructure directly**. It triggers Kestra flows via HTTP webhooks, and Kestra executes in isolated Docker containers. All commands go through an allowlist/denylist in `config.toml`.
+## Monorepo Structure
 
-## Key Files
+```
+AutomIT/
+├── apps/
+│   ├── control-plane/        # TypeScript Express + Claude Agent SDK
+│   └── glpi-plugin/          # PHP GLPI 10.0.14+ plugin
+├── services/
+│   └── tool-gateway/         # Python FastAPI + adapters
+├── packages/
+│   ├── schemas/              # Shared Zod schemas (ActionContract, TicketContext, AuditReceipt)
+│   └── policies/             # YAML policy files (tiers, cooldowns, redaction)
+├── kestra/
+│   └── flows/                # 8 Kestra YAML workflows
+├── infra/
+│   ├── docker-compose.yml    # Full stack (Kestra, Postgres, control-plane, tool-gateway, monitoring)
+│   ├── Dockerfile.*          # Container images
+│   ├── .sops.yaml            # SOPS+age encryption config
+│   └── grafana/, prometheus.yml, loki/
+├── docs/
+│   ├── adr/                  # Architecture Decision Records (ADR-001 through ADR-005)
+│   ├── plans/                # Design docs and implementation plans
+│   └── runbooks/             # Operational runbooks
+├── evals/                    # E2E test scripts
+├── scripts/                  # Utility scripts (connectivity tests, etc.)
+├── .github/workflows/        # CI: trufflehog, trivy, CodeQL, typecheck, ruff
+├── .env.template             # All env vars (copy to .env, fill values)
+└── CLAUDE.md                 # This file
+```
 
-| File | Purpose |
-|------|---------|
-| `docker-compose.yml` | Full stack definition with optional `local-llm` and `monitoring` profiles |
-| `zeroclaw/config.toml` | ZeroClaw agent config: LLM routing, security allowlist/denylist, heartbeat prompt, tools |
-| `zeroclaw/openai-proxy.conf` | nginx reverse proxy: routes `/backend-api/` → `chatgpt.com`, `/oauth/` → `auth.openai.com` |
-| `zeroclaw/ca-bundle.pem` | Corporate MITM CA bundle for nginx proxy TLS verification |
-| `zeroclaw/IDENTITY.md` | Agent persona, autonomy levels, operational principles |
-| `.env.template` | All required environment variables (webhook keys, credentials, LLM API keys) |
-| `kestra/flows/erp-health-check.yml` | Kestra flow: 5-min cron monitoring CEGID/Sage X3 |
-| `kestra/flows/erp-job-restart.yml` | Kestra flow: L1 auto-restart of failed ERP jobs (webhook trigger) |
-| `kestra/flows/incident-escalation-l2.yml` | Kestra flow: L2 escalation with ticket creation and human approval pause |
-| `kestra/flows/ad-maintenance.yml` | Kestra flow: weekly AD audit with optional remediation |
-| `kestra/flows/ad-onboarding.yml` | Kestra flow: L2 onboarding — AD + M365 + ERP provisioning |
-| `kestra/flows/ad-offboarding.yml` | Kestra flow: L2 offboarding — disable AD, revoke M365, revoke ERP |
-| `kestra/flows/m365-audit.yml` | Kestra flow: weekly M365 audit — licences, MFA, risky users, sign-ins |
-| `docs/prometheus.yml` | Prometheus scraping config (Kestra + Pushgateway) |
-| `docs/grafana/dashboards/automit-overview.json` | Grafana dashboard: ERP health, M365, Kestra executions |
-| `docs/grafana/provisioning/` | Grafana auto-provisioning: datasource + dashboard provider |
-| `scripts/erp/test_connectivity.py` | Connectivity test: CEGID MCP + Sage X3 MCP (8 tests) |
-| `scripts/docker/Dockerfile.python-erp` | Custom Docker image: python:3.12-slim + ODBC 17 + corporate CA |
-| `scripts/sync-codex-tokens.py` | Token sync from Codex CLI to ZeroClaw (ChaCha20-Poly1305) |
-| `claude_desktop_config.json` | MCP server config for Claude Desktop |
-| `.github/*.chatmode.md` | Four Claude Desktop modes: architect, code, ask, debug |
-| `memory-bank/` | Project knowledge base (mostly stubs to be filled) |
+## Stack & Operations
+
+```bash
+# Start full stack
+docker compose -f infra/docker-compose.yml up -d
+
+# With monitoring (Prometheus + Grafana + Loki)
+docker compose -f infra/docker-compose.yml --profile monitoring up -d
+
+# With local LLM (Ollama + GPU)
+docker compose -f infra/docker-compose.yml --profile local-llm up -d
+
+# Health checks
+curl -s http://localhost:8080/api/v1/health          # Kestra
+curl -s http://localhost:3001/health                  # Control Plane
+curl -s http://localhost:3002/health                  # Tool Gateway
+
+# E2E smoke test
+bash evals/e2e-test.sh
+```
+
+**Service endpoints** (all bound to `127.0.0.1`):
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| Kestra UI | 8080 | Workflow management |
+| Kestra mgmt | 8081 | Management API |
+| Control Plane | 3001 | Agent SDK + policy engine |
+| Tool Gateway | 3002 | GLPI/ERP/M365 adapters |
+| Prometheus | 9090 | Metrics (monitoring profile) |
+| Grafana | 3000 | Dashboards (monitoring profile) |
+| Ollama | 11434 | Local LLM (local-llm profile) |
+
+## Target Infrastructure
+
+- **Sage X3**: Access **exclusively via MCP x3-oracle** (`MAS_D0Z9TB4:8001`). No direct SQL.
+- **CEGID XRP Sprint**: Access **exclusively via MCP cegid-oracle** (`10.255.15.200:8000`). 20 MCP tools. No direct SQL (port 1433 not accessible).
+- **AD**: Windows Server 2022, DC: `dc01.motherson.local`
+- **M365**: E3, tenant: `adigroupe.onmicrosoft.com`. Entra ID App Registration required.
+- **GLPI**: v10.0.14 (migration to 11.0.6 planned). REST API + plugin.
+- **Compliance**: EN9100 (aerospace), sites Serre-Castet + Tanger
+
+### SSL/TLS
+
+- **CEGID SQL Server**: `TrustServerCertificate=yes` + `Encrypt=yes` (self-signed cert)
+- **Docker builds**: Corporate proxy requires CA bundle injection (`infra/ca-bundle.pem`)
 
 ## Conventions
 
-- **Language**: Documentation and agent prompts in French. Technical terms in English.
-- **Flow namespaces**: `motherson.it.erp`, `motherson.it.incidents`, `motherson.it.ad`
-- **Webhook URLs**: `/api/v1/executions/webhook/{namespace}/{flow-id}/{key}`
-- **Webhook keys**: Generated with `openssl rand -hex 20`, stored in `.env`, one per flow
-- **Secrets**: Always in `.env` or Kestra `secret()`, never in YAML flows or config files
-- **Scripts**: PowerShell for AD/M365, Python for ERP/monitoring — always Docker-isolated, never native execution in prod
-- **ZeroClaw security**: Read-only container, 64MB RAM cap, 0.5 CPU cap, tmpfs for /tmp
+- **Language**: Documentation in French, technical terms in English
+- **Flow namespaces**: `motherson.it.erp`, `motherson.it.incidents`, `motherson.it.ad`, `motherson.it.m365`
+- **Webhook keys**: `openssl rand -hex 20`, stored in `.env`, one per flow
+- **Secrets**: SOPS+age for encryption at rest. Never in YAML or code. Use `.env` + Kestra `secret()`
+- **Auth**: HMAC-SHA256 signatures between all tiers (GLPI → Control Plane → Tool Gateway)
+- **Docker images**: Pinned to specific version tags (e.g., `kestra/kestra:v0.21.1`)
 - **Ticket IDs**: `INC-YYYYMMDD-{hash}`
 
-## MCP Servers Available
+## Key ADRs
 
-- **x3-oracle**: Sage X3 production — `http://MAS_D0Z9TB4:8001/mcp/` (Neo4j + vector search). Seul point d'accès X3, pas de SQL direct. Ref: `C:\Code\X3-Oracle`
-- **cegid-oracle**: CEGID XRP Sprint — `http://10.255.15.200:8000/mcp` (20 tools: `query_database`, `analyze_data_freshness`, `database_overview`, `search_knowledge`, `explore_schema`, etc.). Seul point d'accès CEGID (port 1433 non accessible). Token: `X-MCP-TOKEN`. Ref: `C:\Code\CEGID`
-- **kestra-mcp**: Kestra flow/execution management from Claude Desktop
+| ADR | Decision |
+|-----|----------|
+| ADR-001 | Three-tier architecture (GLPI → Control Plane → Tool Gateway → Kestra) |
+| ADR-002 | TypeScript control plane with Claude Agent SDK (`dontAsk` + `allowedTools`) |
+| ADR-003 | SOPS+age for secret encryption at rest |
+| ADR-004 | Dual approval: GLPI CommonITILValidation (primary) + Kestra Pause (break-glass) |
+| ADR-005 | ZeroClaw removed — control plane absorbs its responsibilities |
 
 ## Working on Kestra Flows
 
-Flows are YAML files in `kestra/flows/`, auto-loaded via volume mount to `/app/flows` in Kestra. Each flow follows the pattern:
-1. **Trigger**: Cron schedule or webhook
-2. **Inputs**: Type-safe with defaults and allowed values
-3. **Tasks**: Docker-isolated Python/PowerShell scripts using `automit/python-erp:3.12` (includes ODBC 17, corporate CA, pyodbc, requests, kestra SDK)
+Flows are YAML files in `kestra/flows/`, auto-loaded via volume mount. Each flow follows:
+1. **Trigger**: Cron schedule or webhook (unique key per flow)
+2. **Inputs**: Type-safe with defaults and allowed values (SELECT for allowlisted inputs)
+3. **Tasks**: Docker-isolated Python/PowerShell using `automit/python-erp:3.12` image
 4. **Outputs**: Structured JSON
-5. **Notifications**: Teams webhook + email Graph API (double canal)
+5. **Notifications**: Teams webhook + Graph API email (double canal)
 
-### Email Notifications (Graph API Mail.Send)
+**Important**: All ERP access goes through MCP servers, never direct SQL. Job names validated against allowlist (SELECT input + regex + exact-match DB verification).
 
-Les flows onboarding, offboarding, m365-audit et incident-escalation envoient des emails via `POST /users/{mailbox}/sendMail`. Pattern :
-- **Sender**: `automit-noreply@adigroupe.onmicrosoft.com` (shared mailbox, Application Access Policy)
-- **Recipients**: `manager_email` (input) + `M365_IT_TEAM_EMAIL` (env var)
-- **Format**: HTML (tableau récapitulatif)
-- **Fallback**: Si credentials Entra ID absentes, l'email n'est pas envoyé (notification Teams reste active)
-- **Variables secrets**: `M365_SERVICE_MAILBOX`, `M365_IT_TEAM_EMAIL`, `AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET`
+## Working on the Control Plane
 
-**Important**: All ERP access goes through MCP servers, never direct SQL. CEGID uses `query_database` tool for read queries and `sp_start_job` for job restarts. Sage X3 uses `batch_status`/`batch_restart` tools.
+TypeScript Express server (`apps/control-plane/`). Key modules:
+- `middleware/auth.ts`: HMAC signature verification + timestamp freshness (5min window)
+- `policy-engine.ts`: Tier validation, cooldowns, emergency stop, immutable target IDs
+- `context-assembler.ts`: Fetches GLPI ticket context from tool gateway
+- `audit.ts`: Receipt creation per action (UUID-based)
+- `routes/`: analyze, propose, execute, status, kill
 
-Flow IDs use the namespace as prefix in the YAML `id` field (e.g., `erp-job-restart` under namespace `motherson.it.erp`).
+Claude Agent SDK integration uses `permissionMode: "dontAsk"` + explicit `allowedTools` for locked-down headless agent.
 
-## Working on ZeroClaw Config
+## Working on the Tool Gateway
 
-**Version**: v0.1.7 (2026-02-24) — `debian:trixie-slim` (GLIBC 2.41)
+Python FastAPI (`services/tool-gateway/`). Key modules:
+- `adapters/glpi.py`: GLPI REST API (session-based auth, ticket context + followup)
+- `adapters/erp.py`: ERP via MCP (job registry, regex validation, Tier 2 blocked by default)
+- `adapters/m365.py`: Graph API with `@odata.nextLink` pagination + `Retry-After` throttling
+- `middleware/auth.py`: HMAC verification on all endpoints except `/health`
+- `middleware/circuit_breaker.py`: Per-adapter circuit breaker (closed → open → half-open)
+- `registry/cooldown.py`: Per action+target rate limiting
+- `registry/job_registry.yml`: Allowlisted CEGID jobs with tier and cooldown
 
-**LLM Provider**: `openai-codex` — OAuth via abonnement ChatGPT Pro (zero coût API supplémentaire). Modèle: `gpt-5.3-codex`.
+## MCP Servers Available
 
-**API Endpoint**: `chatgpt.com/backend-api/codex/responses` (NOT `api.openai.com/v1/responses`). Le Codex CLI et ZeroClaw utilisent l'endpoint backend ChatGPT, pas l'API Platform. Les tokens OIDC (`openid profile email offline_access`) suffisent — pas besoin de scopes API type `api.responses.write`.
+- **x3-oracle**: Sage X3 — `http://MAS_D0Z9TB4:8001/mcp/` (Neo4j + vector search)
+- **cegid-oracle**: CEGID XRP Sprint — `http://10.255.15.200:8000/mcp` (20 tools)
+- **kestra-mcp**: Kestra flow/execution management from Claude Desktop
 
-**Auth architecture**: ZeroClaw (rustls+webpki-roots) ne peut pas traverser le proxy corporate MITM. Solution: sidecar nginx (`openai-proxy`) qui termine le TLS avec le CA store système (incluant `ca-bundle.pem`).
+## Email Notifications (Graph API Mail.Send)
 
-```
-ZeroClaw (HTTP) → nginx sidecar → HTTPS → chatgpt.com/backend-api/codex/responses
-                                 → HTTPS → auth.openai.com/oauth/* (token refresh)
-```
+- **Sender**: `automit-noreply@adigroupe.onmicrosoft.com` (shared mailbox)
+- **Recipients**: manager + IT team (`M365_IT_TEAM_EMAIL`)
+- **Format**: HTML tables
+- **Fallback**: Teams webhook if Entra ID credentials absent
 
-**Auth initiale** — tokens partagés depuis le Codex CLI host:
-```bash
-# 1. S'authentifier via Codex CLI sur le host Windows (utilise SChannel, passe le proxy)
-codex  # ou: npx @openai/codex  — lance le flow OAuth navigateur
+## Security
 
-# 2. Chiffrer les tokens Codex CLI dans auth-profiles.json ZeroClaw
-python3 scripts/sync-codex-tokens.py  # ChaCha20-Poly1305, clé .secret_key
-
-# 3. Vérifier
-docker exec automit-zeroclaw-erp-agent-1 zeroclaw auth status
-docker exec automit-zeroclaw-erp-agent-1 zeroclaw agent -m "Dis bonjour"
-```
-
-Token persisté dans `~/.zeroclaw/auth-profiles.json` (chiffré ChaCha20-Poly1305, clé dans `.secret_key`). Fallbacks configurés: Gemini 2.5 Flash (free tier), Ollama (local).
-
-**Embeddings**: `snowflake-arctic-embed2` via Ollama (local, multilingue FR/EN). Nécessite `--profile local-llm`.
-
-`zeroclaw/config.toml` controls the agent behavior. Key sections:
-- `[model_routing]`: Task-specific LLM selection (analysis/coding/conversation)
-- `[security.command_allowlist]`: Commands the agent can execute without human approval
-- `[security.command_denylist]`: Commands that are always forbidden
-- `[heartbeat]`: The core agent loop prompt that drives L1/L2/L3 decision-making
-- `[autonomy]`: Current mode (`readonly` | `supervised` | `autonomous`)
-
-When modifying the allowlist, be conservative — new patterns should be as specific as possible.
+- All Docker images pinned to specific versions (no `:latest`)
+- All ports bound to `127.0.0.1`
+- HMAC-SHA256 authentication between all tiers
+- SOPS+age for secret encryption at rest
+- CI: TruffleHog (secret scan), Trivy (image scan), CodeQL (Python + JS)
+- Emergency stop via `/kill` endpoint (admin token required)
+- Docker socket mount documented as known risk (roadmap: rootless Docker)
