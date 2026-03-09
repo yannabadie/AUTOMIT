@@ -8,7 +8,9 @@ export function verifySignature(req: Request, res: Response, next: NextFunction)
   // Kill endpoint uses admin token
   if (req.path === "/kill") {
     const token = req.headers["x-automit-admin-token"] as string;
-    if (!token || token !== ADMIN_TOKEN) {
+    if (!token || !ADMIN_TOKEN ||
+        token.length !== ADMIN_TOKEN.length ||
+        !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(ADMIN_TOKEN))) {
       res.status(403).json({ error: "Invalid admin token" });
       return;
     }

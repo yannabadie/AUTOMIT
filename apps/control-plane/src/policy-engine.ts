@@ -51,8 +51,9 @@ export function validateAction(action: {
   action_id: string;
   tier: number;
   target: { id: string };
-  requestor: { interface: string };
+  requestor: { interface: string; right?: string };
   ttl_seconds: number;
+  issued_at?: number;
 }): PolicyResult {
   if (emergencyStop && action.tier > 0) {
     return { allowed: false, reason: "Emergency stop active — analysis only" };
@@ -65,6 +66,13 @@ export function validateAction(action: {
 
   if (action.requestor.interface !== "central") {
     return { allowed: false, reason: "Central interface required" };
+  }
+
+  // Rights check
+  if (tierDef.required_right && tierDef.required_right !== "none") {
+    if (!action.requestor.right || action.requestor.right !== tierDef.required_right) {
+      return { allowed: false, reason: `Missing right: ${tierDef.required_right}` };
+    }
   }
 
   if (!action.target.id || action.target.id.trim() === "") {
@@ -90,8 +98,15 @@ export function validateAction(action: {
     }
   }
 
+  // TTL validation with issued_at
   if (action.ttl_seconds <= 0) {
-    return { allowed: false, reason: "Action proposal expired" };
+    return { allowed: false, reason: "TTL must be positive" };
+  }
+  if (action.issued_at) {
+    const age = Date.now() / 1000 - action.issued_at;
+    if (age > action.ttl_seconds) {
+      return { allowed: false, reason: `Action proposal expired (age: ${Math.round(age)}s, TTL: ${action.ttl_seconds}s)` };
+    }
   }
 
   return {

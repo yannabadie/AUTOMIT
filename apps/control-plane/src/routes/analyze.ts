@@ -12,18 +12,18 @@ export async function analyzeHandler(req: Request, res: Response): Promise<void>
 
     const context = await assembleContext(ticket_id);
 
-    // TODO: Call Claude Agent SDK here
-    // For now, return a placeholder that shows the architecture works
+    // STUB: Claude Agent SDK integration pending (Phase 5)
+    // When implemented: agent.query() with context, permissionMode: "dontAsk"
     const result: Record<string, unknown> = {
-      analysis: `Ticket #${ticket_id} analyzed. Context assembled (${context.length} chars).`,
-      mode,
-      technician: { user_id, profile, entity },
+      ticket_id,
+      context_length: context.length,
+      mode: mode || "analyze",
+      stub: true,
+      message: "Agent SDK not yet integrated — context assembly verified",
     };
 
     if (mode === "draft") {
-      result.draft_private = `[Draft prive] Analyse du ticket #${ticket_id} — diagnostic en cours.`;
-      result.draft_public = `Bonjour, nous avons bien recu votre demande et l'equipe IT est en cours d'analyse.`;
-      result.citations = ["KB-001: Procedure standard"];
+      result.stub_notice = "Draft generation requires Claude Agent SDK (not yet wired)";
     }
 
     res.json(result);

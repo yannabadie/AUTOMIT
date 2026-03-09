@@ -1,3 +1,5 @@
+import { hmacFetch } from "./hmac-fetch.js";
+
 const TOOL_GATEWAY_URL = process.env.TOOL_GATEWAY_URL || "http://localhost:3002";
 
 export interface TicketContext {
@@ -17,7 +19,7 @@ export interface TicketContext {
 }
 
 export async function assembleContext(ticketId: number): Promise<string> {
-  const resp = await fetch(`${TOOL_GATEWAY_URL}/glpi/ticket/${ticketId}`);
+  const resp = await hmacFetch(`${TOOL_GATEWAY_URL}/glpi/ticket/${ticketId}`, { method: "GET" });
   if (!resp.ok) throw new Error(`Failed to fetch ticket ${ticketId}: ${resp.status}`);
   const ticket: TicketContext = await resp.json();
 

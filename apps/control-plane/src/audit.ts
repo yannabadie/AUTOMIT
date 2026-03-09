@@ -40,6 +40,10 @@ export function getReceipt(receiptId: string): AuditReceipt | undefined {
   return auditLog.find(r => r.receipt_id === receiptId);
 }
 
+export function getReceiptByActionId(actionId: string): AuditReceipt | undefined {
+  return auditLog.find(r => r.action_id === actionId);
+}
+
 export function getAuditLog(): AuditReceipt[] {
   return [...auditLog];
 }

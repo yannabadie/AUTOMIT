@@ -24,12 +24,24 @@ check "Tool Gateway" "curl -sf http://127.0.0.1:3002/health"
 
 echo ""
 echo "[2/4] Tool Gateway endpoints"
-check "ERP job list" "curl -sf http://127.0.0.1:3002/erp/jobs"
-check "ERP job status" "curl -sf http://127.0.0.1:3002/erp/job/IMPORT_COMMANDES/status"
+HMAC_SECRET="${AUTOMIT_HMAC_SECRET:-test-secret}"
+
+hmac_curl() {
+    local method=$1 url=$2 data=${3:-""}
+    local sig
+    sig=$(echo -n "$data" | openssl dgst -sha256 -hmac "$HMAC_SECRET" -hex 2>/dev/null | awk '{print $NF}')
+    if [ "$method" = "GET" ]; then
+        curl -sf "$url" -H "X-Signature: $sig"
+    else
+        curl -sf -X "$method" "$url" -H "Content-Type: application/json" -H "X-Signature: $sig" -d "$data"
+    fi
+}
+
+check "ERP job list" "hmac_curl GET http://127.0.0.1:3002/erp/jobs"
+check "ERP job status" "hmac_curl GET http://127.0.0.1:3002/erp/job/IMPORT_COMMANDES/status"
 
 echo ""
 echo "[3/4] Control Plane (HMAC-signed requests)"
-HMAC_SECRET="${AUTOMIT_HMAC_SECRET:-test-secret}"
 PAYLOAD="{\"ticket_id\":1,\"mode\":\"analyze\",\"user_id\":1,\"profile\":\"Super-Admin\",\"entity\":\"Root\",\"interface\":\"central\",\"timestamp\":$(date +%s)}"
 SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$HMAC_SECRET" -hex 2>/dev/null | awk '{print $NF}')
 check "Analyze endpoint" "curl -sf -X POST http://127.0.0.1:3001/analyze -H 'Content-Type: application/json' -H 'X-AutomIT-Signature: $SIG' -d '$PAYLOAD'"

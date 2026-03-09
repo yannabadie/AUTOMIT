@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { validateAction, recordExecution, isEmergencyStop } from "../policy-engine.js";
 import { createReceipt } from "../audit.js";
+import { hmacFetch } from "../hmac-fetch.js";
 
 const TOOL_GATEWAY_URL = process.env.TOOL_GATEWAY_URL || "http://localhost:3002";
 
@@ -38,9 +39,8 @@ export async function executeHandler(req: Request, res: Response): Promise<void>
     // Execute via tool gateway
     let result: Record<string, unknown>;
     try {
-      const resp = await fetch(`${TOOL_GATEWAY_URL}/glpi/ticket/${action.target.id}/followup`, {
+      const resp = await hmacFetch(`${TOOL_GATEWAY_URL}/glpi/ticket/${action.target.id}/followup`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: action.justification, is_private: true }),
       });
       result = await resp.json();

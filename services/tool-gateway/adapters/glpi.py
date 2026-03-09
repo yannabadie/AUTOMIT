@@ -1,3 +1,4 @@
+import hashlib
 import os
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -51,8 +52,42 @@ async def get_ticket_context(ticket_id: int):
                 headers=headers,
             )
             followups = resp_fu.json() if resp_fu.status_code == 200 else []
+
+            # Fetch requester name
+            requester_id = ticket.get("users_id_recipient", 0)
+            requester_name = ""
+            if requester_id:
+                try:
+                    resp_user = await client.get(
+                        f"{GLPI_URL}/apirest.php/User/{requester_id}",
+                        headers=headers,
+                    )
+                    if resp_user.status_code == 200:
+                        requester_name = resp_user.json().get("name", "")
+                except Exception:
+                    pass
+
+            # Fetch linked assets
+            linked_assets = []
+            try:
+                resp_items = await client.get(
+                    f"{GLPI_URL}/apirest.php/Ticket/{ticket_id}/Item_Ticket",
+                    headers=headers,
+                )
+                if resp_items.status_code == 200:
+                    items = resp_items.json()
+                    if isinstance(items, list):
+                        linked_assets = [
+                            {"type": it.get("itemtype", ""), "id": it.get("items_id", 0), "name": it.get("itemtype", "")}
+                            for it in items
+                        ]
+            except Exception:
+                pass
     finally:
         await kill_session(session)
+
+    content_str = f"{ticket.get('name', '')}{ticket.get('content', '')}"
+    ticket_hash = hashlib.sha256(content_str.encode()).hexdigest()[:16]
 
     return {
         "ticket_id": ticket_id,
@@ -62,7 +97,7 @@ async def get_ticket_context(ticket_id: int):
         "urgency": ticket.get("urgency", 3),
         "impact": ticket.get("impact", 3),
         "priority": ticket.get("priority", 3),
-        "requester": {"id": ticket.get("users_id_recipient", 0), "name": ""},
+        "requester": {"id": requester_id, "name": requester_name},
         "followups": [
             {
                 "id": fu.get("id", 0),
@@ -73,8 +108,8 @@ async def get_ticket_context(ticket_id: int):
             }
             for fu in (followups if isinstance(followups, list) else [])
         ],
-        "linked_assets": [],
-        "ticket_hash": "",
+        "linked_assets": linked_assets,
+        "ticket_hash": ticket_hash,
     }
 
 
