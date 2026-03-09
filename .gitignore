@@ -1,7 +1,11 @@
-# Secrets
+# Secrets — NEVER commit
 .env
 !.env.encrypted
 !.env.template
+claude_desktop_config.json
+kestra-secrets.env
+kestra_secrets_env.txt
+INFOS-RSSI.txt
 *.pem
 *.key
 *.crt
@@ -32,8 +36,6 @@ Desktop.ini
 .vscode/
 *.swp
 *.swo
-kestra-secrets.env
-kestra_secrets_env.txt
 flows_check.json
 err*.json
 import_result*.json
