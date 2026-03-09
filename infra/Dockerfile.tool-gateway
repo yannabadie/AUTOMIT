@@ -1,36 +1,42 @@
-# =============================================================================
-# AutomIT — Python ERP Runtime
-# Image custom avec pyodbc + ODBC Driver 17 (CEGID SQL Server)
-# Usage: docker build -t automit/python-erp:3.12 -f scripts/docker/Dockerfile.python-erp .
-# =============================================================================
+# AutomIT Tool Gateway — Python FastAPI
+# Deterministic adapters for GLPI, ERP (MCP), M365, AD
 FROM python:3.12-slim
 
-# Install ODBC Driver 17 for SQL Server (Debian 12 Bookworm)
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl gnupg2 apt-transport-https \
-    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql-release.list \
-    && apt-get update \
-    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev libgssapi-krb5-2 \
-    && apt-get purge -y curl gnupg2 apt-transport-https \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+# Install ODBC driver for SQL Server connectivity
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      curl gnupg2 unixodbc-dev ca-certificates && \
+    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | \
+      gpg --dearmor -o /usr/share/keyrings/ms.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/ms.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
+      > /etc/apt/sources.list.d/mssql.list && \
+    apt-get update && \
+    ACCEPT_EULA=Y apt-get install -y msodbcsql17 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Inject corporate CA bundle for pip (MITM proxy)
-COPY zeroclaw/ca-bundle.pem /usr/local/share/ca-certificates/corporate-ca.crt
-RUN update-ca-certificates
-ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt
-
-# Install Python dependencies
-COPY scripts/docker/requirements-erp.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
-
-# Verify ODBC driver installed
-RUN python -c "import pyodbc; print('Drivers:', pyodbc.drivers())"
-
-# Install shared AutomIT library
-COPY scripts/lib /opt/automit/lib
-ENV PYTHONPATH="/opt/automit:${PYTHONPATH}"
+# Corporate CA (if present)
+COPY infra/ca-bundle.pem /usr/local/share/ca-certificates/corporate-ca.crt
+RUN update-ca-certificates 2>/dev/null || true
 
 WORKDIR /app
+
+# Install Python dependencies
+COPY services/tool-gateway/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY services/tool-gateway/ .
+
+# Copy shared schemas (JSON Schema for Python validation)
+COPY packages/schemas/dist/*.schema.json ./schemas/
+
+# Copy policy files
+COPY packages/policies ./policies
+
+# Non-root user
+RUN useradd -r -s /bin/false appuser
+USER appuser
+
+EXPOSE 3002
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3002"]

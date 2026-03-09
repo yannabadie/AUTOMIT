@@ -7,6 +7,7 @@ kestra-secrets.env
 kestra_secrets_env.txt
 INFOS-RSSI.txt
 *.pem
+!infra/ca-bundle.pem
 *.key
 *.crt
 *.pfx
