@@ -82,6 +82,49 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
+  # CONTROL PLANE — TypeScript Agent SDK (Claude Opus/Sonnet)
+  # ---------------------------------------------------------------------------
+  control-plane:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.control-plane
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      - PORT=3001
+      - AUTOMIT_HMAC_SECRET=${AUTOMIT_HMAC_SECRET}
+      - AUTOMIT_ADMIN_TOKEN=${AUTOMIT_ADMIN_TOKEN}
+      - TOOL_GATEWAY_URL=http://tool-gateway:3002
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    depends_on:
+      - tool-gateway
+    networks:
+      - motherson-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # TOOL GATEWAY — Python FastAPI (GLPI, ERP, M365 adapters)
+  # ---------------------------------------------------------------------------
+  tool-gateway:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.tool-gateway
+    ports:
+      - "127.0.0.1:3002:3002"
+    environment:
+      - GLPI_URL=${GLPI_URL}
+      - GLPI_APP_TOKEN=${GLPI_APP_TOKEN}
+      - GLPI_USER_TOKEN=${GLPI_USER_TOKEN}
+      - CEGID_MCP_URL=${MCP_CEGID_ORACLE_URL}
+      - CEGID_MCP_TOKEN=${MCP_CEGID_ORACLE_TOKEN}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+    networks:
+      - motherson-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # OLLAMA — Local LLM (optional, for air-gap / confidential workloads)
   # ---------------------------------------------------------------------------
   ollama:

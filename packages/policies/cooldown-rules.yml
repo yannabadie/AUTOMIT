@@ -1,0 +1,19 @@
+# Cooldown rules per action type
+# Prevents duplicate/rapid-fire execution
+cooldowns:
+  restart_erp_job:
+    min_interval_seconds: 900   # 15 minutes
+    max_per_hour: 3
+    scope: "target.id"
+  disable_ad_user:
+    min_interval_seconds: 3600  # 1 hour
+    max_per_hour: 1
+    scope: "target.id"
+  send_mail:
+    min_interval_seconds: 60
+    max_per_hour: 10
+    scope: "target.id"
+  add_followup:
+    min_interval_seconds: 10
+    max_per_hour: 30
+    scope: "target.id"
