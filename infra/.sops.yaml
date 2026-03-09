@@ -1,0 +1,11 @@
+# AutomIT Secret Encryption — SOPS + age
+# Setup:
+#   1. Install: winget install FiloSottile.age && winget install Mozilla.sops
+#   2. Generate key: age-keygen -o ~/.config/sops/age/keys.txt
+#   3. Replace the public key below with your actual key
+#   4. Encrypt: sops -e .env > .env.encrypted
+#   5. Decrypt: sops -d .env.encrypted > .env
+creation_rules:
+  - path_regex: \.env\.encrypted$
+    age: >-
+      age1REPLACE_WITH_YOUR_PUBLIC_KEY

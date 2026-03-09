@@ -1,0 +1,235 @@
+# =============================================================================
+# MOTHERSON AEROSPACE — IT Automation Stack
+# Kestra (Orchestrator) + Supporting Services
+# =============================================================================
+# Usage: docker compose -f infra/docker-compose.yml up -d
+# Kestra UI:       http://localhost:8080
+# Prometheus:       http://localhost:9090
+# Grafana:          http://localhost:3000
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # KESTRA — Orchestration Engine
+  # ---------------------------------------------------------------------------
+  kestra:
+    image: kestra/kestra:v0.21.1
+    user: "root"
+    entrypoint: ["/opt/scripts/kestra-entrypoint.sh"]
+    command: server local
+    env_file:
+      - ../kestra-secrets.env
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"  # Management port
+    volumes:
+      - kestra-data:/app/storage
+      # SECURITY NOTE: Docker socket mount required for Kestra's Docker task runner.
+      # Roadmap: migrate to rootless Docker or socket proxy (e.g. Tecnativa/docker-socket-proxy).
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/kestra-wd:/tmp/kestra-wd
+      - ../kestra/flows:/app/flows  # Auto-load flows
+      - ../scripts/docker/kestra-entrypoint.sh:/opt/scripts/kestra-entrypoint.sh:ro
+    environment:
+      KESTRA_CONFIGURATION: |
+        kestra:
+          server:
+            basic-auth:
+              enabled: true
+              username: yann.abadie@motherson-mas.com
+              password: ${KESTRA_ADMIN_PASSWORD:?KESTRA_ADMIN_PASSWORD must be set in .env}
+          repository:
+            type: postgres
+          storage:
+            type: local
+            local:
+              base-path: /app/storage
+          queue:
+            type: postgres
+          datasources:
+            postgres:
+              url: jdbc:postgresql://postgres:5432/kestra
+              driverClassName: org.postgresql.Driver
+              username: kestra
+              password: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+          # Auto-import flows from mounted directory
+          flows:
+            path: /app/flows
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - motherson-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # POSTGRESQL — Kestra Backend
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16.6-alpine3.21
+    environment:
+      POSTGRES_DB: kestra
+      POSTGRES_USER: kestra
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kestra"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - motherson-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # CONTROL PLANE — TypeScript Agent SDK (Claude Opus/Sonnet)
+  # ---------------------------------------------------------------------------
+  control-plane:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.control-plane
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      - PORT=3001
+      - AUTOMIT_HMAC_SECRET=${AUTOMIT_HMAC_SECRET}
+      - AUTOMIT_ADMIN_TOKEN=${AUTOMIT_ADMIN_TOKEN}
+      - TOOL_GATEWAY_URL=http://tool-gateway:3002
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    depends_on:
+      - tool-gateway
+    networks:
+      - motherson-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # TOOL GATEWAY — Python FastAPI (GLPI, ERP, M365 adapters)
+  # ---------------------------------------------------------------------------
+  tool-gateway:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.tool-gateway
+    ports:
+      - "127.0.0.1:3002:3002"
+    environment:
+      - GLPI_URL=${GLPI_URL}
+      - GLPI_APP_TOKEN=${GLPI_APP_TOKEN}
+      - GLPI_USER_TOKEN=${GLPI_USER_TOKEN}
+      - CEGID_MCP_URL=${MCP_CEGID_ORACLE_URL}
+      - CEGID_MCP_TOKEN=${MCP_CEGID_ORACLE_TOKEN}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      - AUTOMIT_HMAC_SECRET=${AUTOMIT_HMAC_SECRET}
+    networks:
+      - motherson-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # OLLAMA — Local LLM (optional, for air-gap / confidential workloads)
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:0.5.7
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - motherson-net
+    restart: unless-stopped
+    profiles:
+      - local-llm  # Only starts with: docker compose --profile local-llm up
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ---------------------------------------------------------------------------
+  # PROMETHEUS — Metrics collection
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert-rules.yml:/etc/prometheus/rules/alert-rules.yml:ro
+    networks:
+      - motherson-net
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # ---------------------------------------------------------------------------
+  # PUSHGATEWAY — Custom metrics from Kestra flows (ERP health, M365 status)
+  # ---------------------------------------------------------------------------
+  pushgateway:
+    image: prom/pushgateway:v1.11.0
+    ports:
+      - "127.0.0.1:9091:9091"
+    networks:
+      - motherson-net
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # ---------------------------------------------------------------------------
+  # GRAFANA — Dashboards (auto-provisioned)
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.5.2
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/automit-overview.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - motherson-net
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # ---------------------------------------------------------------------------
+  # LOKI — Log Aggregation
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.4.2
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - motherson-net
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+volumes:
+  kestra-data:
+  postgres-data:
+  ollama-models:
+  grafana-data:
+  loki-data:
+
+networks:
+  motherson-net:
+    driver: bridge

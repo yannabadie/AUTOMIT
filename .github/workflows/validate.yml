@@ -20,7 +20,7 @@ jobs:
           yamllint -d "{extends: relaxed, rules: {line-length: {max: 300}, truthy: disable}}" kestra/flows/*.yml
 
       - name: Validate docker-compose
-        run: docker compose config --quiet
+        run: docker compose -f infra/docker-compose.yml config --quiet
 
       - name: Check env template completeness
         run: |
@@ -39,4 +39,72 @@ jobs:
           echo "All secrets accounted for in .env.template"
 
       - name: Validate Python library syntax
-        run: python -c "import ast; ast.parse(open('scripts/lib/mcp_client.py').read()); print('OK')"
+        run: |
+          find scripts/ services/ -name "*.py" -exec python -c "import ast; ast.parse(open('{}').read()); print('OK: {}')" \;
+
+  typecheck-schemas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
+        working-directory: packages/schemas
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+        working-directory: packages/schemas
+
+  python-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint Python scripts
+        run: ruff check scripts/ services/ --ignore E501
+      - name: Validate Python syntax
+        run: |
+          find scripts/ services/ -name "*.py" -exec python -c "import ast; ast.parse(open('{}').read()); print('OK: {}')" \;
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: TruffleHog secret scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
+
+  image-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3

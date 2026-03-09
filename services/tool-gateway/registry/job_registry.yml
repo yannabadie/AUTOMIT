@@ -1,0 +1,31 @@
+jobs:
+  IMPORT_COMMANDES:
+    job_id: "IMPORT_COMMANDES"
+    erp_system: "cegid"
+    tier: 2
+    cooldown_min: 15
+    description: "Import des commandes clients depuis EDI"
+  SYNC_STOCK:
+    job_id: "SYNC_STOCK"
+    erp_system: "cegid"
+    tier: 2
+    cooldown_min: 15
+    description: "Synchronisation stock entre CEGID et atelier"
+  EXPORT_FACTURES:
+    job_id: "EXPORT_FACTURES"
+    erp_system: "cegid"
+    tier: 2
+    cooldown_min: 30
+    description: "Export factures vers comptabilite"
+  SYNC_ARTICLES:
+    job_id: "SYNC_ARTICLES"
+    erp_system: "cegid"
+    tier: 2
+    cooldown_min: 15
+    description: "Synchronisation fiches articles"
+  IMPORT_OF:
+    job_id: "IMPORT_OF"
+    erp_system: "cegid"
+    tier: 2
+    cooldown_min: 15
+    description: "Import ordres de fabrication"

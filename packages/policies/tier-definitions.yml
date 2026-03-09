@@ -1,0 +1,37 @@
+# AutomIT Action Tier Definitions
+# Each tier maps to GLPI profile rights and approval requirements
+tiers:
+  0:
+    name: "Read-only / Analysis"
+    approval: none
+    required_right: "plugin_automit_use"
+    examples:
+      - read_ticket
+      - search_kb
+      - summarize
+      - classify
+  1:
+    name: "Reversible ticket ops"
+    approval: single
+    required_right: "plugin_automit_use"
+    examples:
+      - add_followup
+      - create_task
+      - link_asset
+      - set_solution
+  2:
+    name: "Bounded external actions"
+    approval: single_with_policy
+    required_right: "plugin_automit_execute"
+    examples:
+      - restart_erp_job
+      - send_mail
+      - create_change
+  3:
+    name: "Destructive actions"
+    approval: dual
+    required_right: "plugin_automit_critical"
+    examples:
+      - disable_ad_user
+      - revoke_m365
+      - offboard_user

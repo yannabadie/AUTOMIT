@@ -135,7 +135,7 @@ tasks:
           "name": "📋 Voir dans Kestra",
           "targets": [{
             "os": "default",
-            "uri": "http://kestra:8080/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
+            "uri": "{{ envs.KESTRA_EXTERNAL_URL ?? 'http://localhost:8080' }}/ui/executions/{{ flow.namespace }}/{{ flow.id }}/{{ execution.id }}"
           }]
         }]
       }

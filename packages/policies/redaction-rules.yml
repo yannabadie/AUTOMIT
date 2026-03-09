@@ -1,0 +1,24 @@
+# Redaction rules for public ticket responses
+# Patterns that must NEVER appear in public followups
+redaction:
+  patterns:
+    - type: regex
+      pattern: '\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+      description: "IP addresses"
+    - type: regex
+      pattern: '(?i)(password|secret|token|api.?key)\s*[:=]\s*\S+'
+      description: "Credentials in key=value format"
+    - type: regex
+      pattern: '(?i)(srvdata|srvcgd|adgroupe\.com|motherson\.local)'
+      description: "Internal hostnames"
+    - type: regex
+      pattern: '(?i)stack\s*trace|traceback|exception\s+in'
+      description: "Stack traces"
+    - type: keyword
+      values:
+        - "docker.sock"
+        - "kestra:8080"
+        - "sa_password"
+        - ".env"
+        - "ODBC Driver"
+      description: "Infrastructure keywords"

@@ -1,0 +1,13 @@
+#automit-panel {
+    padding: 10px 0;
+}
+#automit-panel .automit-actions {
+    border-bottom: 1px solid #dee2e6;
+    padding-bottom: 10px;
+}
+#automit-panel .card {
+    margin-top: 10px;
+}
+#automit-loading {
+    padding: 20px;
+}
