@@ -15,8 +15,7 @@ services:
   # KESTRA — Orchestration Engine
   # ---------------------------------------------------------------------------
   kestra:
-    image: kestra/kestra:latest
-    pull_policy: always
+    image: kestra/kestra:v0.21.1
     user: "root"
     entrypoint: ["/opt/scripts/kestra-entrypoint.sh"]
     command: server local
@@ -68,7 +67,7 @@ services:
   # POSTGRESQL — Kestra Backend
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.6-alpine3.21
     environment:
       POSTGRES_DB: kestra
       POSTGRES_USER: kestra
@@ -90,7 +89,7 @@ services:
   # This nginx reverse proxy handles TLS with the system CA store.
   # ---------------------------------------------------------------------------
   openai-proxy:
-    image: nginx:alpine
+    image: nginx:1.27.3-alpine
     container_name: zeroclaw-openai-proxy
     ports:
       - "18080:80"  # Exposed to host for auth token exchange (curl --ssl-no-revoke alternative)
@@ -160,7 +159,7 @@ services:
   # OLLAMA — Local LLM (optional, for air-gap / confidential workloads)
   # ---------------------------------------------------------------------------
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.5.7
     ports:
       - "11434:11434"
     volumes:
@@ -182,7 +181,7 @@ services:
   # PROMETHEUS — Metrics collection
   # ---------------------------------------------------------------------------
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.2.1
     ports:
       - "9090:9090"
     volumes:
@@ -198,7 +197,7 @@ services:
   # PUSHGATEWAY — Custom metrics from Kestra flows (ERP health, M365 status)
   # ---------------------------------------------------------------------------
   pushgateway:
-    image: prom/pushgateway:latest
+    image: prom/pushgateway:v1.11.0
     ports:
       - "9091:9091"
     networks:
@@ -211,7 +210,7 @@ services:
   # GRAFANA — Dashboards (auto-provisioned)
   # ---------------------------------------------------------------------------
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.5.2
     ports:
       - "3000:3000"
     environment:
@@ -239,7 +238,7 @@ services:
   # LOKI — Log Aggregation
   # ---------------------------------------------------------------------------
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:3.4.2
     ports:
       - "3100:3100"
     volumes:
