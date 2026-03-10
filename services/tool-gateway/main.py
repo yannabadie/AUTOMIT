@@ -1,3 +1,6 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from middleware.auth import verify_hmac
@@ -6,15 +9,23 @@ from adapters.erp import router as erp_router
 from adapters.m365 import router as m365_router
 from adapters.state import router as state_router, init_schema
 
-app = FastAPI(title="AutomIT Tool Gateway", version="1.0.0")
 
-
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     try:
         init_schema()
     except Exception as e:
-        print(f"[WARN] Could not init schema: {e}")
+        logging.warning("Could not init schema: %s", e)
+    yield
+    # Shutdown (nothing to do)
+
+
+app = FastAPI(
+    title="AutomIT Tool Gateway",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 
 class HMACAuthMiddleware(BaseHTTPMiddleware):

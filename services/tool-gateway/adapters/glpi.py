@@ -78,7 +78,11 @@ async def get_ticket_context(ticket_id: int):
                     items = resp_items.json()
                     if isinstance(items, list):
                         linked_assets = [
-                            {"type": it.get("itemtype", ""), "id": it.get("items_id", 0), "name": it.get("itemtype", "")}
+                            {
+                                "type": it.get("itemtype", ""),
+                                "id": it.get("items_id", 0),
+                                "name": it.get("itemtype", ""),
+                            }
                             for it in items
                         ]
             except Exception:
@@ -142,5 +146,8 @@ async def add_followup(ticket_id: int, body: dict):
         await kill_session(session)
 
     if resp.status_code not in (200, 201):
-        raise HTTPException(status_code=resp.status_code, detail="Failed to create followup")
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail="Failed to create followup",
+        )
     return resp.json()

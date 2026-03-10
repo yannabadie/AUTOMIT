@@ -76,8 +76,9 @@ async def list_risky_signins():
         return {"count": 0, "risky_users": [], "error": "Azure not configured"}
     token = await get_graph_token()
     headers = {"Authorization": f"Bearer {token}"}
-    risky = await graph_get_all(
-        f"{GRAPH_URL}/identityProtection/riskyUsers?$filter=riskState eq 'atRisk'&$top=50",
-        headers,
+    risky_url = (
+        f"{GRAPH_URL}/identityProtection/riskyUsers"
+        "?$filter=riskState eq 'atRisk'&$top=50"
     )
+    risky = await graph_get_all(risky_url, headers)
     return {"count": len(risky), "risky_users": risky}

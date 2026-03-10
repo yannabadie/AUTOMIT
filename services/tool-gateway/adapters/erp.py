@@ -53,7 +53,11 @@ async def get_job_status(job_id: str):
         raise HTTPException(status_code=400, detail="Invalid job ID format")
 
     if not CEGID_MCP_URL:
-        return {"job_id": job_id, "registry": JOB_REGISTRY[job_id], "db_status": "MCP not configured"}
+        return {
+            "job_id": job_id,
+            "registry": JOB_REGISTRY[job_id],
+            "db_status": "MCP not configured",
+        }
 
     sql = f"SELECT name, enabled FROM msdb.dbo.sysjobs WHERE name = N'{job_id}'"
     result = await mcp_call("query_database", {"sql": sql})
@@ -65,5 +69,8 @@ async def restart_job(job_id: str):
     """Tier 2 — blocked until Phase 5 governance is in place."""
     raise HTTPException(
         status_code=403,
-        detail=f"Job restart for '{job_id}' is a Tier 2 action — blocked until Phase 5 governance",
+        detail=(
+            f"Job restart for '{job_id}' is a Tier 2 action"
+            " — blocked until Phase 5 governance"
+        ),
     )

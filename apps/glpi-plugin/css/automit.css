@@ -5,7 +5,7 @@
     border-bottom: 1px solid #dee2e6;
     padding-bottom: 10px;
 }
-#automit-panel .card {
+#automit-panel > .card {
     margin-top: 10px;
 }
 #automit-loading {
@@ -43,4 +43,35 @@
     background-color: #cff4fc;
     border: 1px solid #b6effb;
     border-radius: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+    .automit-success {
+        background-color: #1a3a2a;
+        color: #a3d9a5;
+        border-color: #2d6a3e;
+    }
+    .automit-error {
+        background-color: #3a1a1a;
+        color: #d9a3a3;
+        border-color: #6a2d2d;
+    }
+    .automit-hint {
+        background-color: #3a3a1a;
+        color: #d9d9a3;
+        border-color: #6a6a2d;
+    }
+    .automit-executing {
+        background-color: #1a2a3a;
+        color: #a3c4d9;
+        border-color: #2d4a6a;
+    }
+    #automit-panel {
+        background-color: #1e1e2e;
+        border-color: #444;
+    }
+    #automit-panel > .card {
+        background-color: #2a2a3a;
+        border-color: #555;
+    }
 }

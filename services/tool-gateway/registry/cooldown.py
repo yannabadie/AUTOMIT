@@ -1,3 +1,7 @@
+# In-memory cooldown fallback — used when PostgreSQL is unavailable.
+# For persistent cooldowns, see adapters/state.py (PostgreSQL-backed).
+# The control plane should prefer the /state/cooldowns/check endpoint.
+
 import time
 from collections import defaultdict
 
@@ -8,7 +12,13 @@ class CooldownRegistry:
     def __init__(self):
         self._history: dict[str, list[float]] = defaultdict(list)
 
-    def can_execute(self, action_id: str, target_id: str, min_interval_s: int, max_per_hour: int) -> tuple[bool, str]:
+    def can_execute(
+        self,
+        action_id: str,
+        target_id: str,
+        min_interval_s: int,
+        max_per_hour: int,
+    ) -> tuple[bool, str]:
         key = f"{action_id}:{target_id}"
         now = time.time()
         history = self._history[key]

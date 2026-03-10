@@ -1,6 +1,18 @@
 (function() {
     'use strict';
 
+    function generateUUID() {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            return crypto.randomUUID();
+        }
+        // Fallback for older browsers / non-HTTPS
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16 | 0;
+            var v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
+
     document.addEventListener('DOMContentLoaded', function() {
         var panel = document.getElementById('automit-panel');
         if (!panel) return;
@@ -8,6 +20,7 @@
         var ticketId = panel.dataset.ticketId;
         var rootDoc = (typeof CFG_GLPI !== 'undefined') ? CFG_GLPI.root_doc : '';
 
+        // Uses FormData for compatibility with GLPI's AJAX framework (Session::checkCsrfToken reads $_POST)
         function callAutomit(mode) {
             var loading = document.getElementById('automit-loading');
             var results = document.getElementById('automit-results');
@@ -95,7 +108,7 @@
                     tier: action.tier,
                     target_type: action.target ? action.target.type : 'glpi_ticket',
                     target_id: action.target ? action.target.id : String(ticketId),
-                    idempotency_key: action.idempotency_key || crypto.randomUUID(),
+                    idempotency_key: action.idempotency_key || generateUUID(),
                     justification: action.justification || '',
                 }),
             })

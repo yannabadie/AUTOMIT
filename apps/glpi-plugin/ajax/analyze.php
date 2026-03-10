@@ -38,16 +38,20 @@ if (!$ticket->getFromDB($ticket_id)) {
 }
 
 $config = new PluginAutomitConfig();
-$config->getFromDB(1);
+if (!$config->getFromDB(1)) {
+    http_response_code(500);
+    echo json_encode(['error' => 'Plugin not configured']);
+    exit;
+}
 
 $payload = [
     'ticket_id'   => $ticket_id,
     'mode'        => $mode,
     'user_id'     => Session::getLoginUserID(),
-    'profile'     => $_SESSION['glpiactiveprofile']['name'],
-    'entity'      => $_SESSION['glpiactive_entity'],
+    'profile'     => $_SESSION['glpiactiveprofile']['name'] ?? '',
+    'entity'      => $_SESSION['glpiactive_entity_name'] ?? '',
     'interface'   => 'central',
-    'ticket_hash' => md5(json_encode($ticket->fields)),
+    'ticket_hash' => hash('sha256', json_encode($ticket->fields)),
     'timestamp'   => time(),
 ];
 
@@ -75,4 +79,10 @@ if ($http_code !== 200) {
     exit;
 }
 
-echo $response;
+$decoded = json_decode($response, true);
+if ($decoded === null && $response !== 'null') {
+    http_response_code(502);
+    echo json_encode(['error' => 'Invalid response from control plane']);
+} else {
+    echo json_encode($decoded);
+}

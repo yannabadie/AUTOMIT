@@ -1,7 +1,7 @@
 <?php
 function plugin_automit_install() {
     global $DB;
-    if (!$DB->tableExists('glpi_plugin_automit_actions')) {
+    if (!$DB->tableExists('glpi_plugin_automit_actions') || !$DB->tableExists('glpi_plugin_automit_configs')) {
         $DB->runFile(__DIR__ . '/install/sql/install.sql');
     }
     PluginAutomitProfile::createFirstAccess($_SESSION['glpiactiveprofile']['id']);

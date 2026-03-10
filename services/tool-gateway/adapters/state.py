@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter()
 
@@ -80,7 +80,7 @@ class AuditReceiptCreate(BaseModel):
     requestor_entity: str = ""
     tier: int = 0
     result: str  # success, failure, partial
-    details: dict = {}
+    details: dict = Field(default_factory=dict)
 
 
 @router.post("/audit/receipts")
@@ -91,9 +91,14 @@ def create_receipt(body: AuditReceiptCreate):
             receipt_id = str(uuid.uuid4())
             cur.execute("""
                 INSERT INTO automit.audit_receipts
-                (receipt_id, action_id, target_type, target_id, target_display_name,
-                 requestor_glpi_user_id, requestor_profile, requestor_entity, tier, result, details)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (receipt_id, action_id, target_type, target_id,
+                 target_display_name, requestor_glpi_user_id,
+                 requestor_profile, requestor_entity,
+                 tier, result, details)
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s
+                )
                 RETURNING receipt_id, created_at
             """, (receipt_id, body.action_id, body.target_type, body.target_id,
                   body.target_display_name, body.requestor_glpi_user_id,
@@ -101,7 +106,10 @@ def create_receipt(body: AuditReceiptCreate):
                   body.result, json.dumps(body.details)))
             row = cur.fetchone()
             conn.commit()
-            return {"receipt_id": row["receipt_id"], "created_at": row["created_at"].isoformat()}
+            return {
+                "receipt_id": row["receipt_id"],
+                "created_at": row["created_at"].isoformat(),
+            }
     finally:
         conn.close()
 
@@ -159,7 +167,12 @@ def record_cooldown(body: dict):
 
 
 @router.get("/cooldowns/check")
-def check_cooldown(action_id: str, target_id: str, min_interval_seconds: int = 900, max_per_hour: int = 4):
+def check_cooldown(
+    action_id: str,
+    target_id: str,
+    min_interval_seconds: int = 900,
+    max_per_hour: int = 4,
+):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -185,7 +198,10 @@ def check_cooldown(action_id: str, target_id: str, min_interval_seconds: int = 9
             """, (action_id, target_id, one_hour_ago))
             count = cur.fetchone()["cnt"]
             if count >= max_per_hour:
-                return {"allowed": False, "reason": f"Rate limit: max {max_per_hour}/hour"}
+                return {
+                    "allowed": False,
+                    "reason": f"Rate limit: max {max_per_hour}/hour",
+                }
 
         return {"allowed": True}
     finally:
@@ -199,7 +215,10 @@ def get_emergency_stop():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT value FROM automit.system_state WHERE key = 'emergency_stop'")
+            cur.execute(
+                "SELECT value FROM automit.system_state"
+                " WHERE key = 'emergency_stop'"
+            )
             row = cur.fetchone()
             return row["value"] if row else {"active": False}
     finally:
@@ -215,7 +234,10 @@ def set_emergency_stop(body: dict):
             cur.execute("""
                 INSERT INTO automit.system_state (key, value, updated_at)
                 VALUES ('emergency_stop', %s::jsonb, NOW())
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                ON CONFLICT (key)
+                DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_at = NOW()
             """, (json.dumps({"active": active}),))
             conn.commit()
         return {"active": active}
