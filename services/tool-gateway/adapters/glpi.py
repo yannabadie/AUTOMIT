@@ -65,7 +65,7 @@ async def get_ticket_context(ticket_id: int):
                     if resp_user.status_code == 200:
                         requester_name = resp_user.json().get("name", "")
                 except Exception:
-                    pass
+                    pass  # Non-critical: fallback to empty requester name
 
             # Fetch linked assets
             linked_assets = []
@@ -82,7 +82,7 @@ async def get_ticket_context(ticket_id: int):
                             for it in items
                         ]
             except Exception:
-                pass
+                pass  # Non-critical: fallback to empty linked assets
     finally:
         await kill_session(session)
 

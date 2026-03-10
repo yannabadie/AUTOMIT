@@ -17,10 +17,12 @@ VARIABLES
     tier,           \* action_id -> tier level
     requestor,      \* action_id -> technician ID
     approver,       \* action_id -> approver ID (or NULL)
+    approver2,      \* action_id -> second approver ID for dual approval (or "none")
+    action_target,  \* action_id -> target ID bound during execution (or "none")
     target_locks,   \* target_id -> action_id currently executing (or NULL)
     emergency_stop  \* boolean
 
-vars == << state, tier, requestor, approver, target_locks, emergency_stop >>
+vars == << state, tier, requestor, approver, approver2, action_target, target_locks, emergency_stop >>
 
 States == {"proposed", "approved", "executing", "completed", "failed", "rolled_back", "expired"}
 
@@ -29,6 +31,8 @@ TypeInvariant ==
     /\ tier \in [Actions -> Tiers \cup {-1}]
     /\ requestor \in [Actions -> Technicians \cup {"none"}]
     /\ approver \in [Actions -> Approvers \cup {"none"}]
+    /\ approver2 \in [Actions -> Approvers \cup {"none"}]
+    /\ action_target \in [Actions -> Targets \cup {"none"}]
     /\ target_locks \in [Targets -> Actions \cup {"none"}]
     /\ emergency_stop \in BOOLEAN
 
@@ -37,13 +41,15 @@ Init ==
     /\ tier = [a \in Actions |-> -1]
     /\ requestor = [a \in Actions |-> "none"]
     /\ approver = [a \in Actions |-> "none"]
+    /\ approver2 = [a \in Actions |-> "none"]
+    /\ action_target = [a \in Actions |-> "none"]
     /\ target_locks = [t \in Targets |-> "none"]
     /\ emergency_stop = FALSE
 
 \* --- Actions ---
 
 \* Propose an action (any technician, any tier)
-Propose(a, t, tech, tgt) ==
+Propose(a, t, tech) ==
     /\ state[a] = "idle"
     /\ ~emergency_stop
     /\ t \in Tiers
@@ -51,14 +57,14 @@ Propose(a, t, tech, tgt) ==
     /\ state' = [state EXCEPT ![a] = "proposed"]
     /\ tier' = [tier EXCEPT ![a] = t]
     /\ requestor' = [requestor EXCEPT ![a] = tech]
-    /\ UNCHANGED << approver, target_locks, emergency_stop >>
+    /\ UNCHANGED << approver, approver2, action_target, target_locks, emergency_stop >>
 
 \* Auto-approve Tier 0-1 (no human approval needed)
 AutoApprove(a) ==
     /\ state[a] = "proposed"
     /\ tier[a] \in {0, 1}
     /\ state' = [state EXCEPT ![a] = "approved"]
-    /\ UNCHANGED << tier, requestor, approver, target_locks, emergency_stop >>
+    /\ UNCHANGED << tier, requestor, approver, approver2, action_target, target_locks, emergency_stop >>
 
 \* Human approval for Tier 2-3 (GLPI CommonITILValidation)
 HumanApprove(a, app) ==
@@ -68,7 +74,7 @@ HumanApprove(a, app) ==
     /\ app # requestor[a]  \* Cannot self-approve
     /\ state' = [state EXCEPT ![a] = "approved"]
     /\ approver' = [approver EXCEPT ![a] = app]
-    /\ UNCHANGED << tier, requestor, target_locks, emergency_stop >>
+    /\ UNCHANGED << tier, requestor, approver2, action_target, target_locks, emergency_stop >>
 
 \* Dual approval for Tier 3 (second approval via Kestra break-glass)
 \* Modeled as requiring HumanApprove to have happened first
@@ -79,8 +85,8 @@ DualApprove(a, app2) ==
     /\ app2 # approver[a]  \* Different from first approver
     /\ app2 # requestor[a] \* Different from requestor
     \* State stays approved but with second approver recorded
-    /\ approver' = [approver EXCEPT ![a] = app2]
-    /\ UNCHANGED << state, tier, requestor, target_locks, emergency_stop >>
+    /\ approver2' = [approver2 EXCEPT ![a] = app2]
+    /\ UNCHANGED << state, tier, requestor, approver, action_target, target_locks, emergency_stop >>
 
 \* Begin execution (lock target)
 BeginExecute(a, tgt) ==
@@ -88,60 +94,63 @@ BeginExecute(a, tgt) ==
     /\ target_locks[tgt] = "none"  \* No concurrent execution on same target
     /\ ~emergency_stop
     /\ state' = [state EXCEPT ![a] = "executing"]
+    /\ action_target' = [action_target EXCEPT ![a] = tgt]
     /\ target_locks' = [target_locks EXCEPT ![tgt] = a]
-    /\ UNCHANGED << tier, requestor, approver, emergency_stop >>
+    /\ UNCHANGED << tier, requestor, approver, approver2, emergency_stop >>
 
 \* Complete execution (release lock)
 Complete(a, tgt) ==
     /\ state[a] = "executing"
+    /\ action_target[a] = tgt
     /\ target_locks[tgt] = a
     /\ state' = [state EXCEPT ![a] = "completed"]
     /\ target_locks' = [target_locks EXCEPT ![tgt] = "none"]
-    /\ UNCHANGED << tier, requestor, approver, emergency_stop >>
+    /\ UNCHANGED << tier, requestor, approver, approver2, action_target, emergency_stop >>
 
 \* Fail execution (release lock)
 Fail(a, tgt) ==
     /\ state[a] = "executing"
+    /\ action_target[a] = tgt
     /\ target_locks[tgt] = a
     /\ state' = [state EXCEPT ![a] = "failed"]
     /\ target_locks' = [target_locks EXCEPT ![tgt] = "none"]
-    /\ UNCHANGED << tier, requestor, approver, emergency_stop >>
+    /\ UNCHANGED << tier, requestor, approver, approver2, action_target, emergency_stop >>
 
 \* Rollback (from completed state only)
-Rollback(a, tgt) ==
+Rollback(a) ==
     /\ state[a] = "completed"
-    /\ target_locks[tgt] = "none"
+    /\ target_locks[action_target[a]] = "none"
     /\ state' = [state EXCEPT ![a] = "rolled_back"]
-    /\ UNCHANGED << tier, requestor, approver, target_locks, emergency_stop >>
+    /\ UNCHANGED << tier, requestor, approver, approver2, action_target, target_locks, emergency_stop >>
 
 \* Expire (from proposed state only)
 Expire(a) ==
     /\ state[a] = "proposed"
     /\ state' = [state EXCEPT ![a] = "expired"]
-    /\ UNCHANGED << tier, requestor, approver, target_locks, emergency_stop >>
+    /\ UNCHANGED << tier, requestor, approver, approver2, action_target, target_locks, emergency_stop >>
 
 \* Emergency stop (blocks all new executions)
 EmergencyStopOn ==
     /\ ~emergency_stop
     /\ emergency_stop' = TRUE
-    /\ UNCHANGED << state, tier, requestor, approver, target_locks >>
+    /\ UNCHANGED << state, tier, requestor, approver, approver2, action_target, target_locks >>
 
 EmergencyStopOff ==
     /\ emergency_stop
     /\ emergency_stop' = FALSE
-    /\ UNCHANGED << state, tier, requestor, approver, target_locks >>
+    /\ UNCHANGED << state, tier, requestor, approver, approver2, action_target, target_locks >>
 
 \* --- Next state ---
 
 Next ==
-    \/ \E a \in Actions, t \in Tiers, tech \in Technicians, tgt \in Targets : Propose(a, t, tech, tgt)
+    \/ \E a \in Actions, t \in Tiers, tech \in Technicians : Propose(a, t, tech)
     \/ \E a \in Actions : AutoApprove(a)
     \/ \E a \in Actions, app \in Approvers : HumanApprove(a, app)
     \/ \E a \in Actions, app2 \in Approvers : DualApprove(a, app2)
     \/ \E a \in Actions, tgt \in Targets : BeginExecute(a, tgt)
     \/ \E a \in Actions, tgt \in Targets : Complete(a, tgt)
     \/ \E a \in Actions, tgt \in Targets : Fail(a, tgt)
-    \/ \E a \in Actions, tgt \in Targets : Rollback(a, tgt)
+    \/ \E a \in Actions : Rollback(a)
     \/ \E a \in Actions : Expire(a)
     \/ EmergencyStopOn
     \/ EmergencyStopOff
@@ -162,18 +171,17 @@ NoTargetConflict ==
         target_locks[t] # "none" =>
             Cardinality({a \in Actions : state[a] = "executing" /\ target_locks[t] = a}) = 1
 
-\* Emergency stop prevents new executions
+\* Emergency stop prevents new executions (action constraint)
 EmergencyStopBlocksExecution ==
-    emergency_stop =>
-        \A a \in Actions : state[a] # "executing" \/ state[a] = state[a]
-        \* More precisely: no action transitions TO executing during e-stop
-        \* This is enforced by BeginExecute precondition
+    \A a \in Actions :
+        (emergency_stop /\ state[a] # "executing") => state'[a] # "executing"
 
-\* Terminal states are truly terminal
+\* Terminal states are truly terminal (action constraint)
 TerminalStatesStable ==
     \A a \in Actions :
-        state[a] \in {"completed", "failed", "rolled_back", "expired"} =>
-            state'[a] = state[a] \/ state'[a] = "rolled_back"
-            \* Only completed can transition to rolled_back
+        (/\ state[a] \in {"failed", "rolled_back", "expired"}
+            => state'[a] = state[a])
+        /\ (state[a] = "completed"
+            => state'[a] \in {"completed", "rolled_back"})
 
 =============================================================================

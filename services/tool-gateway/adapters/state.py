@@ -2,18 +2,15 @@ import os
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
 
 router = APIRouter()
 
 # Use Kestra's PostgreSQL (same instance, different schema)
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://kestra:kestra_secret@postgres:5432/kestra")
-
-# In-process connection pool (asyncpg would be better but psycopg2 is simpler for now)
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 
 def get_conn():

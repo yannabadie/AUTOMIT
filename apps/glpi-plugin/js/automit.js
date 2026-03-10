@@ -32,7 +32,7 @@
                 loading.classList.add('d-none');
                 if (data.error) {
                     output.classList.remove('d-none');
-                    output.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
+                    output.innerHTML = '<div class="alert alert-danger">' + escapeHtml(data.error || '') + '</div>';
                     return;
                 }
                 if (mode === 'analyze' || mode === 'draft') {
@@ -44,11 +44,18 @@
             .catch(function(err) {
                 loading.classList.add('d-none');
                 output.classList.remove('d-none');
-                output.innerHTML = '<div class="alert alert-danger">Error: ' + err.message + '</div>';
+                output.innerHTML = '<div class="alert alert-danger">Error: ' + escapeHtml(err.message || '') + '</div>';
             });
         }
 
         function renderDraft(container, data) {
+            // Store draft data globally for automitAcceptDraft
+            window._automitDraftData = {
+                ticket_id: ticketId,
+                private_followup: data.draft_private || '',
+                public_followup: data.draft_public || '',
+            };
+
             var html = '<div class="card"><div class="card-body">';
             if (data.analysis) {
                 html += '<h5>Analyse</h5><div class="mb-3">' + escapeHtml(data.analysis) + '</div>';
@@ -111,9 +118,13 @@
         }
 
         function getAjaxCsrf() {
-            // GLPI stores CSRF token in a meta tag or as a JS variable
+            // Try meta tag first
             var meta = document.querySelector('meta[name="csrf-token"]');
-            if (meta) return meta.getAttribute('content');
+            if (meta) return meta.getAttribute('content') || '';
+            // Try GLPI's hidden input
+            var input = document.querySelector('input[name="_glpi_csrf_token"]');
+            if (input) return input.value || '';
+            // Try global
             if (typeof CFG_GLPI !== 'undefined' && CFG_GLPI.csrf_token) return CFG_GLPI.csrf_token;
             return '';
         }
@@ -122,6 +133,50 @@
         window.automitExecuteAction = function(actionIndex) {
             if (window._automitActions && window._automitActions[actionIndex]) {
                 executeAction(window._automitActions[actionIndex]);
+            }
+        };
+
+        // Accept a draft (private or public) and post it as a followup
+        window.automitAcceptDraft = function(type) {
+            var draft = window._automitDraftData;
+            if (!draft || !draft.ticket_id) {
+                alert('Aucun brouillon disponible');
+                return;
+            }
+            var content = (type === 'private') ? draft.private_followup : draft.public_followup;
+            if (!content) {
+                alert('Contenu ' + type + ' non disponible');
+                return;
+            }
+            if (confirm('Poster le followup ' + type + ' sur le ticket #' + draft.ticket_id + ' ?')) {
+                var panel = document.getElementById('automit-result') || document.getElementById('automit-draft-output');
+                if (panel) {
+                    panel.innerHTML = '<p>Publication en cours...</p>';
+                }
+
+                var formData = new FormData();
+                formData.append('ticket_id', draft.ticket_id);
+                formData.append('action', 'post_followup');
+                formData.append('followup_type', type);
+                formData.append('content', content);
+
+                fetch(rootDoc + '/plugins/automit/ajax/analyze.php', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (!panel) return;
+                    if (data.error) {
+                        panel.innerHTML = '<div class="automit-error">' + escapeHtml(data.error) + '</div>';
+                    } else {
+                        panel.innerHTML = '<div class="automit-success">Followup ' + escapeHtml(type) + ' publie avec succes</div>';
+                    }
+                })
+                .catch(function(err) {
+                    if (!panel) return;
+                    panel.innerHTML = '<div class="automit-error">Erreur: ' + escapeHtml(err.message || '') + '</div>';
+                });
             }
         };
 
@@ -142,7 +197,9 @@
                 html += '<span>' + escapeHtml(action.action_id) + '</span>';
                 html += '<span class="badge ' + tierBadge + '">Tier ' + action.tier + '</span></div>';
                 html += '<div class="card-body">';
-                html += '<p><strong>Cible:</strong> ' + escapeHtml(action.target.display_name) + ' (' + escapeHtml(action.target.id) + ')</p>';
+                var targetName = action.target ? escapeHtml(action.target.display_name) : 'N/A';
+                var targetId = action.target ? escapeHtml(action.target.id) : '';
+                html += '<p><strong>Cible:</strong> ' + targetName + ' (' + targetId + ')</p>';
                 html += '<p><strong>Justification:</strong> ' + escapeHtml(action.justification) + '</p>';
                 html += '<p><strong>Rollback:</strong> ' + escapeHtml(action.rollback_notes) + '</p>';
                 if (action.tier <= 1) {
